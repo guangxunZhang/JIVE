@@ -84,7 +84,8 @@ def main():
                         "overwriting an existing results.json.")
     p.add_argument("--inject_n", type=int, default=4)
     p.add_argument("--power_iters", type=int, default=10)
-    p.add_argument("--fd_eps", type=float, default=1e-1)
+    p.add_argument("--fd_eps", type=float, default=4.0,
+                   help="Finite-difference step for the JVPs. FLUX runs in bf16 (ULP ~0.008 near 1), so smaller steps round away; keep in sync with set_level --fd-eps.")
     # perf / eval
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--fwd_chunk", type=int, default=2)
