@@ -21,7 +21,7 @@ import torch
 
 @torch.no_grad()
 def top_subspace(endpoint_fn, z_ref, n_vectors, latent_shape, n_iters=10,
-                 fd_eps=1e-1, device="cpu", verbose=True):
+                 fd_eps=4.0, device="cpu", verbose=True):
     """Top-k eigenvector subspace of the endpoint Jacobian J_D at z_ref.
 
     Parameters
