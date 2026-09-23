@@ -1,19 +1,17 @@
-"""Download & export LSUN Bedroom / Church images.
+"""Download & export LSUN scene images.
 
 Produces, under --out_root/<dataset>/:
   sources/src_000.png ...    guides the six arms locally sample around
   reference/ref_00000.png ...real images for the KID reference set
 
-Primary path: Hugging Face mirrors of LSUN (the official dl.yf.io server is
-frequently down and the full bedroom train LMDB is 43 GB):
-    bedroom : pcuenq/lsun-bedrooms
-    church  : tglcourse/lsun_church_train
-Streaming is used, so only the exported images touch disk. Sources are taken
-AFTER the reference block (disjoint by construction).
+The official LSUN LMDBs, mirrored on Hugging Face as RichardErkhov/LSUN
+(the original dl.yf.io server is frequently down). Used for:
+    classroom, kitchen, conference_room, dining_room, restaurant
+The train zip is downloaded, unpacked, read until enough images have been
+exported, then deleted again unless --keep_lmdb is passed. Needs the `lmdb`
+package.
 
-Fallback path (--from_lmdb ZIP_OR_DIR): export from an official LSUN LMDB
-(e.g. bedroom_val_lmdb.zip from http://dl.yf.io/lsun/scenes/) — needs the
-`lmdb` package.
+--from_lmdb ZIP_OR_DIR overrides that and exports from a local LMDB.
 
 All images are center-cropped and resized to --resolution (default 256, the
 LSUN DDPM checkpoint resolution).
@@ -21,14 +19,22 @@ LSUN DDPM checkpoint resolution).
 import argparse
 import io
 import os
+import shutil
 import zipfile
 
 from PIL import Image
 
-HF_REPOS = {
-    "bedroom": [("pcuenq/lsun-bedrooms", "train")],
-    "church": [("tglcourse/lsun_church_train", "train")],
+# Categories served by the LMDB mirror, and the file inside the repo.
+LMDB_MIRROR_REPO = "RichardErkhov/LSUN"
+LMDB_MIRROR_FILES = {
+    "classroom": "scenes/classroom_train_lmdb.zip",
+    "kitchen": "scenes/kitchen_train_lmdb.zip",
+    "conference_room": "scenes/conference_room_train_lmdb.zip",
+    "dining_room": "scenes/dining_room_train_lmdb.zip",
+    "restaurant": "scenes/restaurant_train_lmdb.zip",
 }
+
+DATASETS = sorted(LMDB_MIRROR_FILES)
 
 
 def center_crop_resize(img, res):
@@ -39,61 +45,41 @@ def center_crop_resize(img, res):
     return img.resize((res, res), Image.LANCZOS)
 
 
-def _first_image(example):
-    for v in example.values():
-        if isinstance(v, Image.Image):
-            return v
-    raise ValueError(f"No PIL image found in example keys: {list(example)}")
+def unzip_lmdb(path):
+    """Unpack an official LSUN <name>_lmdb.zip; returns the LMDB directory."""
+    parent = os.path.dirname(path) or "."
+    extract_dir = path[:-4]
+    if not os.path.isdir(extract_dir):
+        print(f"Unzipping {path} ...")
+        with zipfile.ZipFile(path) as zf:
+            zf.extractall(parent)
+    # official zips contain a single <name>_lmdb directory
+    cands = [extract_dir] + [
+        os.path.join(parent, d)
+        for d in os.listdir(parent) if d.endswith("_lmdb")
+    ]
+    return next(d for d in cands if os.path.isdir(d))
 
 
-def export_from_hf(dataset, out_dir, n_reference, n_sources, res):
-    from datasets import load_dataset
+def fetch_lmdb_from_hf(dataset, cache_dir):
+    """Download + unpack the mirrored LSUN train LMDB; returns (dir, zip)."""
+    from huggingface_hub import hf_hub_download
 
-    last_err = None
-    for repo, split in HF_REPOS[dataset]:
-        try:
-            print(f"Streaming {repo} [{split}] ...")
-            ds = load_dataset(repo, split=split, streaming=True)
-            it = iter(ds)
-            ref_dir = os.path.join(out_dir, "reference")
-            src_dir = os.path.join(out_dir, "sources")
-            os.makedirs(ref_dir, exist_ok=True)
-            os.makedirs(src_dir, exist_ok=True)
-            for i in range(n_reference):
-                img = center_crop_resize(_first_image(next(it)), res)
-                img.save(os.path.join(ref_dir, f"ref_{i:05d}.png"))
-                if (i + 1) % 500 == 0:
-                    print(f"  reference {i + 1}/{n_reference}")
-            for i in range(n_sources):
-                img = center_crop_resize(_first_image(next(it)), res)
-                img.save(os.path.join(src_dir, f"src_{i:03d}.png"))
-            print(f"Exported {n_reference} reference + {n_sources} source "
-                  f"images to {out_dir}")
-            return
-        except Exception as e:  # noqa: BLE001 - try next mirror
-            print(f"  FAILED on {repo}: {e}")
-            last_err = e
-    raise RuntimeError(
-        f"All HF mirrors failed for {dataset}; retry or use --from_lmdb "
-        f"with an official LSUN LMDB zip."
-    ) from last_err
+    os.makedirs(cache_dir, exist_ok=True)
+    print(f"Downloading {LMDB_MIRROR_FILES[dataset]} from "
+          f"{LMDB_MIRROR_REPO} into {cache_dir} (tens of GB) ...")
+    zip_path = hf_hub_download(
+        LMDB_MIRROR_REPO, LMDB_MIRROR_FILES[dataset],
+        repo_type="dataset", local_dir=cache_dir,
+    )
+    return unzip_lmdb(zip_path), zip_path
 
 
 def export_from_lmdb(path, out_dir, n_reference, n_sources, res):
     import lmdb
 
     if path.endswith(".zip"):
-        extract_dir = path[:-4]
-        if not os.path.isdir(extract_dir):
-            print(f"Unzipping {path} ...")
-            with zipfile.ZipFile(path) as zf:
-                zf.extractall(os.path.dirname(path) or ".")
-        # official zips contain a single <name>_lmdb directory
-        cands = [os.path.join(extract_dir)] + [
-            os.path.join(os.path.dirname(path), d)
-            for d in os.listdir(os.path.dirname(path) or ".") if d.endswith("_lmdb")
-        ]
-        path = next(d for d in cands if os.path.isdir(d))
+        path = unzip_lmdb(path)
 
     ref_dir = os.path.join(out_dir, "reference")
     src_dir = os.path.join(out_dir, "sources")
@@ -101,7 +87,7 @@ def export_from_lmdb(path, out_dir, n_reference, n_sources, res):
     os.makedirs(src_dir, exist_ok=True)
 
     env = lmdb.open(path, map_size=1099511627776, max_readers=100,
-                    readonly=True)
+                    readonly=True, lock=False)
     n_total = n_reference + n_sources
     with env.begin(write=False) as txn:
         cursor = txn.cursor()
@@ -125,7 +111,7 @@ def export_from_lmdb(path, out_dir, n_reference, n_sources, res):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", choices=["bedroom", "church"], required=True)
+    p.add_argument("--dataset", choices=DATASETS, required=True)
     p.add_argument("--out_root", default="data")
     p.add_argument("--n_sources", type=int, default=32)
     p.add_argument("--n_reference", type=int, default=2000)
@@ -133,6 +119,12 @@ def main():
     p.add_argument("--from_lmdb", default=None,
                    help="Path to an official LSUN LMDB dir or .zip (fallback "
                         "when the HF mirrors are unreachable)")
+    p.add_argument("--lmdb_cache", default="lsun_lmdb",
+                   help="Scratch space for the mirrored LSUN train LMDBs; "
+                        "needs tens of GB while a category is being exported")
+    p.add_argument("--keep_lmdb", action="store_true",
+                   help="Keep the downloaded zip and unpacked LMDB instead of "
+                        "deleting them once the images are exported")
     args = p.parse_args()
 
     out_dir = os.path.join(args.out_root, args.dataset)
@@ -146,8 +138,17 @@ def main():
         export_from_lmdb(args.from_lmdb, out_dir, args.n_reference,
                          args.n_sources, args.resolution)
     else:
-        export_from_hf(args.dataset, out_dir, args.n_reference,
-                       args.n_sources, args.resolution)
+        lmdb_dir, zip_path = fetch_lmdb_from_hf(args.dataset, args.lmdb_cache)
+        export_from_lmdb(lmdb_dir, out_dir, args.n_reference,
+                         args.n_sources, args.resolution)
+        # Only on success: a failed run keeps the download so it can resume.
+        if not args.keep_lmdb:
+            shutil.rmtree(lmdb_dir, ignore_errors=True)
+            shutil.rmtree(os.path.join(args.lmdb_cache, ".cache"),
+                          ignore_errors=True)
+            if os.path.isfile(zip_path):
+                os.remove(zip_path)
+            print(f"Removed {zip_path} and {lmdb_dir}")
 
 
 if __name__ == "__main__":

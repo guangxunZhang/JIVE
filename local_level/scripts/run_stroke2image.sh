@@ -7,13 +7,13 @@
 #SBATCH --output=logs/stroke2img_%j.log
 #SBATCH --error=logs/stroke2img_%j.log
 
-# Stroke2Image (church): baseline + +JIVE for ONE method arm on FLUX.
+# Stroke2Image: baseline + +JIVE for ONE method arm on FLUX.
 #
-#   input  = coarse stroke painting of an LSUN church (data_stroke/church,
+#   input  = coarse stroke painting of an LSUN scene (data_stroke/<dataset>,
 #            built by make_stroke_sources.py)
-#   output = realistic church photos, guided by "a photo of a church"
-#   KID reference = REAL photos (data_stroke/church/reference is a symlink
-#            to data/church/reference)
+#   output = realistic photos, guided by "a photo of a <scene>"
+#   KID reference = REAL photos (data_stroke/<dataset>/reference is a symlink
+#            to data/<dataset>/reference)
 #
 #   METHOD=sdedit     noise painting to sigma(t0), deterministic Euler ODE
 #                     back (the official SDEdit procedure adapted to rectified
@@ -38,7 +38,7 @@
 set -euo pipefail
 
 METHOD="${METHOD:?Set METHOD=sdedit, boomerang or rf_inverse}"
-DATASET="${DATASET:-church}"
+DATASET="${DATASET:-classroom}"
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   if [[ -z "${PARTITION:-}" ]]; then

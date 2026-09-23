@@ -66,13 +66,17 @@ from common.experiment import (  # noqa: E402
     save_source_samples,
 )
 from common.metrics import LocalLevelMetrics  # noqa: E402
+from common.prepare_data import DATASETS  # noqa: E402
 from common.volume_expansion import (  # noqa: E402
     projected_noise_boundary, top_subspace,
 )
 
 DEFAULT_PROMPTS = {
-    "bedroom": "a photo of a bedroom",
-    "church": "a photo of a church",
+    "classroom": "a photo of a classroom",
+    "kitchen": "a photo of a kitchen",
+    "conference_room": "a photo of a conference room",
+    "dining_room": "a photo of a dining room",
+    "restaurant": "a photo of a restaurant",
 }
 
 # Seed offsets keep the independent noise roles from colliding; the
@@ -182,7 +186,7 @@ def denoise_batch(pipes, velocities, z_start_cpu, timesteps, sigmas, i0,
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--method", choices=["sdedit", "boomerang"], required=True)
-    p.add_argument("--dataset", choices=["bedroom", "church"], required=True)
+    p.add_argument("--dataset", choices=DATASETS, required=True)
     p.add_argument("--data_root", default="data")
     p.add_argument("--prompt", default=None)
     p.add_argument("--model", default=DEFAULT_FLUX_MODEL)
@@ -202,8 +206,7 @@ def main():
                    default=[4.0, 8.0, 12.0, 16.0])
     p.add_argument("--inject_n", type=int, default=4)
     p.add_argument("--power_iters", type=int, default=10)
-    p.add_argument("--fd_eps", type=float, default=4.0,
-                   help="Finite-difference step for the JVPs. FLUX runs in bf16 (ULP ~0.008 near 1), so smaller steps round away; keep in sync with set_level --fd-eps.")
+    p.add_argument("--fd_eps", type=float, default=1e-1)
     # perf / eval
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--fwd_chunk", type=int, default=2)

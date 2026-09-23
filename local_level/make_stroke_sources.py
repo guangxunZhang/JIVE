@@ -30,10 +30,12 @@ sys.path.insert(0, _ROOT)
 
 from stroke_painting import stroke_dabs, stroke_paint  # noqa: E402
 
+from common.prepare_data import DATASETS  # noqa: E402
+
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", choices=["bedroom", "church"], required=True)
+    p.add_argument("--dataset", choices=DATASETS, required=True)
     p.add_argument("--data_root", default="data",
                    help="Root holding the clean sources")
     p.add_argument("--out_root", default="data_stroke",

@@ -44,17 +44,73 @@ from common.experiment import (  # noqa: E402
     save_source_samples,
 )
 from common.metrics import LocalLevelMetrics  # noqa: E402
-from common.volume_expansion import top_subspace  # noqa: E402
+from common.prepare_data import DATASETS  # noqa: E402
+from common.volume_expansion import top_subspace, top_subspace_jtj  # noqa: E402
 
 DEFAULT_PROMPTS = {
-    "bedroom": "a photo of a bedroom",
-    "church": "a photo of a church",
+    "classroom": "a photo of a classroom",
+    "kitchen": "a photo of a kitchen",
+    "conference_room": "a photo of a conference room",
+    "dining_room": "a photo of a dining room",
+    "restaurant": "a photo of a restaurant",
 }
+
+
+def make_flux_vjp_fn(transformer, prompt_embeds, pooled_prompt_embeds,
+                     text_ids, latent_image_ids, guidance_scale, vjp_chunk,
+                     device, sigma, t_val, z0, latent_shape):
+    """J^T w = w - sigma * (dv/dz)^T w for the flow endpoint D = z - sigma v.
+
+    W is (D, k); the return is (D, k). Transformer parameters are frozen so
+    only the latent VJP is allocated. Chunked because the backward is the
+    memory peak of JIVE(J^T J).
+    """
+    use_guidance = bool(getattr(transformer.config, "guidance_embeds", False))
+    weight_dtype = transformer.x_embedder.weight.dtype
+    z0_f32 = z0.reshape(latent_shape).to(device=device, dtype=torch.float32)
+    D = z0_f32.numel()
+
+    def vjp_fn(W):
+        k = W.shape[1]
+        req = [p.requires_grad for p in transformer.parameters()]
+        transformer.requires_grad_(False)
+        grads = []
+        try:
+            for s in range(0, k, vjp_chunk):
+                r = min(vjp_chunk, k - s)
+                z_r = z0_f32.expand(r, -1, -1).clone().requires_grad_(True)
+                tt = torch.full((r,), t_val / 1000.0, device=device,
+                                dtype=weight_dtype)
+                g = (torch.full((r,), float(guidance_scale), device=device,
+                                dtype=torch.float32) if use_guidance else None)
+                with torch.enable_grad():
+                    v = transformer(
+                        hidden_states=z_r.to(weight_dtype),
+                        timestep=tt,
+                        guidance=g,
+                        pooled_projections=pooled_prompt_embeds.expand(r, -1).to(
+                            dtype=weight_dtype),
+                        encoder_hidden_states=prompt_embeds.expand(
+                            r, -1, -1).to(dtype=weight_dtype),
+                        txt_ids=text_ids,
+                        img_ids=latent_image_ids,
+                        return_dict=False,
+                    )[0].float().reshape(r, D)
+                loss = (v * W[:, s:s + r].T).sum()
+                gz = torch.autograd.grad(loss, z_r)[0]
+                grads.append(gz.reshape(r, D).float())
+        finally:
+            for p, flag in zip(transformer.parameters(), req):
+                p.requires_grad_(flag)
+        dvT_W = torch.cat(grads, dim=0).T
+        return W - float(sigma) * dvT_W
+
+    return vjp_fn
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", choices=["bedroom", "church"], required=True)
+    p.add_argument("--dataset", choices=DATASETS, required=True)
     p.add_argument("--data_root", default="data")
     p.add_argument("--prompt", default=None)
     p.add_argument("--model", default=DEFAULT_FLUX_MODEL)
@@ -84,8 +140,19 @@ def main():
                         "overwriting an existing results.json.")
     p.add_argument("--inject_n", type=int, default=4)
     p.add_argument("--power_iters", type=int, default=10)
-    p.add_argument("--fd_eps", type=float, default=4.0,
-                   help="Finite-difference step for the JVPs. FLUX runs in bf16 (ULP ~0.008 near 1), so smaller steps round away; keep in sync with set_level --fd-eps.")
+    p.add_argument("--fd_eps", type=float, default=1e-1)
+    p.add_argument("--jive_iter_mode", choices=["j", "jtj"], default="j",
+                   help="j: Q <- QR(J Q) (invariant subspace of J). "
+                        "jtj: Q <- QR(J^T J Q) (right singular vectors of J).")
+    p.add_argument("--vjp_chunk", type=int, default=2,
+                   help="VJP batch cap for --jive_iter_mode jtj (memory peak).")
+    p.add_argument("--perturb_mode", choices=["additive", "boundary"],
+                   default="additive",
+                   help="additive: set-level z += projected Gaussian at exact "
+                        "L2 norm. boundary: local sphere rotation (old).")
+    p.add_argument("--inject_after_eta", action="store_true",
+                   help="Add JIVE at the first reverse step with eta_t=0 "
+                        "(after stop_timestep), not at t=0.")
     # perf / eval
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--fwd_chunk", type=int, default=2)
@@ -115,7 +182,11 @@ def main():
     model_dtype = torch.bfloat16 if n_gpus > 0 else torch.float32
     local_only = os.path.isdir(args.model)
     print(f"dataset={args.dataset} prompt='{args.prompt}' device={device} "
-          f"n_gpus={n_gpus} model={args.model}")
+          f"n_gpus={n_gpus} model={args.model} "
+          f"jive_iter_mode={args.jive_iter_mode} "
+          f"perturb_mode={args.perturb_mode} "
+          f"inject_after_eta={args.inject_after_eta} "
+          f"skip_baseline={args.skip_baseline} inject_norms={args.inject_norms}")
 
     def _load_pipe_rf(dev):
         pipe = FluxPipeline.from_pretrained(
@@ -167,7 +238,10 @@ def main():
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         if (ckpt.get("etas") == args.etas
                 and ckpt.get("inject_norms") == args.inject_norms
-                and ckpt.get("skip_baseline", False) == args.skip_baseline):
+                and ckpt.get("skip_baseline", False) == args.skip_baseline
+                and ckpt.get("jive_iter_mode", "j") == args.jive_iter_mode
+                and ckpt.get("perturb_mode", "boundary") == args.perturb_mode
+                and ckpt.get("inject_after_eta", False) == args.inject_after_eta):
             if not args.skip_baseline:
                 for eta in args.etas:
                     acc_base[eta].load_state_dict(ckpt["acc_base"][eta])
@@ -186,6 +260,9 @@ def main():
             "next_source_idx": next_idx,
             "etas": args.etas, "inject_norms": args.inject_norms,
             "skip_baseline": args.skip_baseline,
+            "jive_iter_mode": args.jive_iter_mode,
+            "perturb_mode": args.perturb_mode,
+            "inject_after_eta": args.inject_after_eta,
             "acc_base": {eta: acc_base[eta].state_dict() for eta in acc_base},
             "acc_ours": {k: v.state_dict() for k, v in acc_ours.items()},
         }, ckpt_path + ".tmp")
@@ -225,17 +302,30 @@ def main():
             text_ids, latent_image_ids, args.guidance_scale, args.fwd_chunk,
             device, model_dtype,
         )
-        # Flow endpoint at the inverted latent; its Jacobian is what JIVE
-        # takes the top subspace of (same estimator as the SDEdit/Boomerang
-        # arms, which only differ in this closure).
-        def endpoint(z_batch):
-            return z_batch - sigma0 * velocity(z_batch, t0)
+        z_lin = inverted_latents.reshape(latent_shape).float()
+        if args.jive_iter_mode == "jtj":
+            def endpoint_fn(z_batch, _t=t0, _sig=sigma0):
+                return z_batch - _sig * velocity(z_batch, _t)
 
-        U, _S = top_subspace(
-            endpoint, inverted_latents.reshape(latent_shape).float(),
-            args.inject_n, latent_shape,
-            n_iters=args.power_iters, fd_eps=args.fd_eps, device=device,
-        )
+            vjp_fn = make_flux_vjp_fn(
+                pipe_rf.transformer, prompt_embeds, pooled_prompt_embeds,
+                text_ids, latent_image_ids, args.guidance_scale, args.vjp_chunk,
+                device, sigma0, t0, z_lin, latent_shape,
+            )
+            print(f"  JIVE(J^T J) subspace, k={args.inject_n}, "
+                  f"iters={args.power_iters}")
+            U, _S = top_subspace_jtj(
+                endpoint_fn, vjp_fn, z_lin, args.inject_n, latent_shape,
+                n_iters=args.power_iters, fd_eps=args.fd_eps, device=device,
+            )
+        else:
+            def endpoint(z_batch):
+                return z_batch - sigma0 * velocity(z_batch, t0)
+
+            U, _S = top_subspace(
+                endpoint, z_lin, args.inject_n, latent_shape,
+                n_iters=args.power_iters, fd_eps=args.fd_eps, device=device,
+            )
 
         # 3. baseline / +JIVE sampling (shared SDE seeds inside
         # rf_inversion_sample, so norm -> 0 reproduces the baseline)

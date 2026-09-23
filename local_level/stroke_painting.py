@@ -13,8 +13,8 @@ Pipeline:
 
 Example:
   python stroke_painting.py \
-      --image data/church/sources/src_000.png \
-      --out images/church_stroke_src_000.png --grid 24 --colors 12 --blur 2
+      --image data/classroom/sources/src_000.png \
+      --out images/classroom_stroke_src_000.png --grid 24 --colors 12 --blur 2
 """
 import argparse
 
