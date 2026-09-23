@@ -8,8 +8,12 @@
 
 # Downloads / builds EVERYTHING the Stroke2Image comparison needs, on a CPU
 # node (no GPU wasted):
-#   1. LSUN photos   : data/<dataset>/{reference,sources} via HF streaming
-#                      (2000 real reference + 32 source photos, 256x256)
+#   1. LSUN photos   : data/<dataset>/{reference,sources}
+#                      (2000 real reference + 32 source photos, 256x256).
+#                      classroom / kitchen / conference_room / dining_room /
+#                      restaurant come from the official LSUN train LMDBs
+#                      mirrored at RichardErkhov/LSUN, downloaded to
+#                      $LMDB_CACHE, read, then deleted.
 #   2. Stroke inputs : data_stroke/<dataset>/sources  (dab paintings of the
 #                      32 sources, make_stroke_sources.py)
 #   3. KID reference : data_stroke/<dataset>/reference -> symlink to the real
@@ -20,19 +24,20 @@
 # The FLUX.1-dev checkpoint is NOT downloaded here — point $FLUX_MODEL at it.
 #
 # Usage (cluster):   sbatch scripts/download_stroke2image_data.sh
-# Usage (one only):   DATASET=church bash scripts/download_stroke2image_data.sh
-#                    DATASET=bedroom bash scripts/download_stroke2image_data.sh
+#                    sbatch --export=ALL,DATASET=kitchen scripts/download_stroke2image_data.sh
+# Usage (one only):   DATASET=classroom bash scripts/download_stroke2image_data.sh
 # Idempotent: every step skips work that is already done.
 set -euo pipefail
 
 N_SOURCES=32
 N_REFERENCE=2000
 RESOLUTION=256
+LMDB_CACHE="${LMDB_CACHE:-${JIVE_LMDB_CACHE:-lsun_lmdb}}"
 
 if [[ -n "${DATASET:-}" ]]; then
     DATASETS=("${DATASET}")
 else
-    DATASETS=(church bedroom)
+    DATASETS=(classroom kitchen conference_room dining_room restaurant)
 fi
 
 # sbatch copies the script into /opt/slurm/...; $0 is not the project dir.
@@ -65,6 +70,7 @@ prepare_dataset() {
         --n_sources "${N_SOURCES}" \
         --n_reference "${N_REFERENCE}" \
         --resolution "${RESOLUTION}" \
+        --lmdb_cache "${LMDB_CACHE}" \
         || echo "WARNING: prepare_data exited non-zero (may be a shutdown crash)"
 
     python make_stroke_sources.py --dataset "${dataset}" --style dabs

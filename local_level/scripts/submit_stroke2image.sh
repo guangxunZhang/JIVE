@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Submits the whole local-level comparison from the LOGIN node:
-#   6 GPU jobs = {church, bedroom} x {sdedit, boomerang, rf_inverse}
+#   15 GPU jobs = {classroom, kitchen, conference_room, dining_room,
+#                  restaurant} x {sdedit, boomerang, rf_inverse}
 #   on the stroke paintings in data_stroke/<dataset>, each job covering BOTH
 #   its baseline arm and its +JIVE arm.
 #
@@ -15,7 +16,7 @@ PARTITION="${1:?Usage: bash scripts/submit_stroke2image.sh <partition>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$(dirname "$HERE")"   # local_level/, where data_stroke/ lives
 
-DATASETS=(church bedroom)
+DATASETS=(classroom kitchen conference_room dining_room restaurant)
 METHODS=(sdedit boomerang rf_inverse)
 
 for DATASET in "${DATASETS[@]}"; do

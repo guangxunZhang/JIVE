@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import torch
 
-from common.volume_expansion import projected_noise_boundary
+from common.volume_expansion import projected_noise_boundary, projected_noise_like
 
 # Local checkpoint directory or HF repo id; override with $FLUX_MODEL.
 DEFAULT_FLUX_MODEL = os.environ.get(
@@ -88,8 +88,13 @@ def _rf_inversion_chunk(pipe_rf, z_inv_cpu, image_latents_cpu, latent_image_ids_
     dtype = next(pipe_rf.transformer.parameters()).dtype
 
     lat = z_inv_cpu.expand(b, -1, -1).clone()
+    jive_delta = None
+    jive_after_eta = bool(getattr(args, "inject_after_eta", False))
     if delta_chunk is not None:
-        lat = lat + delta_chunk.float()
+        if jive_after_eta:
+            jive_delta = delta_chunk.float().to(device=device, dtype=dtype)
+        else:
+            lat = lat + delta_chunk.float()
     lat = lat.to(device=device, dtype=dtype)
 
     gen = torch.Generator(device=device)
@@ -112,6 +117,8 @@ def _rf_inversion_chunk(pipe_rf, z_inv_cpu, image_latents_cpu, latent_image_ids_
         enable_sde=enable_sde,
         generator=gen,
         output_type="pt",
+        jive_delta=jive_delta,
+        jive_after_eta=jive_after_eta,
     ).images
     return start, out.float().cpu()
 
@@ -172,12 +179,19 @@ def rf_inversion_sample(pipes, inverted_latents, image_latents, latent_image_ids
 
 
 def build_deltas(U, z_ref, inject_norm, args, latent_shape, device):
-    """Per-sample JIVE perturbations of the shared inverted latent: a
-    norm-preserving rotation along span(U) (projected_noise_boundary), one
-    independent direction seed per sample."""
-    perturb_seeds = [args.seed + PERTURB_SEED_OFFSET + i for i in range(args.n)]
-    deltas = [
-        projected_noise_boundary(U, z_ref, inject_norm, latent_shape, device, seed=s)
-        for s in perturb_seeds
-    ]
+    """Per-sample start offsets. additive = set-level JIVE (exact L2 norm);
+    boundary = old local sphere rotation. One independent direction seed
+    per sample."""
+    seeds = [args.seed + PERTURB_SEED_OFFSET + i for i in range(args.n)]
+    if getattr(args, "perturb_mode", "additive") == "additive":
+        deltas = [
+            projected_noise_like(U, inject_norm, latent_shape, device, seed=s)
+            for s in seeds
+        ]
+    else:
+        deltas = [
+            projected_noise_boundary(
+                U, z_ref, inject_norm, latent_shape, device, seed=s)
+            for s in seeds
+        ]
     return torch.cat(deltas, dim=0)
