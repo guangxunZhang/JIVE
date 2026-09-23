@@ -108,7 +108,7 @@ Same FLUX backbone for every method so KID and Vendi are comparable. Each job ru
 | Boomerang (Luzi et al.) | `run_flux_arm.py --method boomerang` | same `t₀` |
 | RF-Inversion (Rout et al.) | `run_rf_inverse.py` | `η ∈ {0.9, 0.5}` |
 
-+JIVE rotates the start latent on `‖z‖ = ‖z_ref‖` inside the top-4 Jacobian subspace (`inject_norm ∈ {4, 8, 12}`).
++JIVE injects into the top-4 Jacobian subspace (`inject_norm ∈ {4, 8, 12}`). RF-Inversion defaults to the set-level additive draw (`--perturb_mode additive`); `--jive_iter_mode jtj` iterates `Q ← QR(JᵀJQ)`. Scenes are LSUN classroom / kitchen / conference_room / dining_room / restaurant.
 
 ```bash
 cd local_level
