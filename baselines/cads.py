@@ -72,6 +72,11 @@ from typing import Dict, List, Optional
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Conventions shared with fdeval. Replicated, not imported, so this file has no
+# dependency on that tree -- but they MUST stay in step, so each is stated with
+# the invariant it protects.
+# ---------------------------------------------------------------------------
 
 def group_seed(base_seed: int, prompt_uid: str, image_idx: int) -> int:
     """
@@ -109,6 +114,9 @@ def write_stub_npz(path: str, meta: dict) -> None:
     os.replace(tmp, path)
 
 
+# ---------------------------------------------------------------------------
+# CADS
+# ---------------------------------------------------------------------------
 
 def cads_gamma(t: float, tau1: float, tau2: float) -> float:
     """Annealing schedule, Eq. 2. `t` is diffusion time in [0,1] = sigma."""
@@ -153,6 +161,7 @@ def cads_corrupt(y, t: float, s: float, tau1: float, tau2: float, psi: float,
     return y_hat.to(y.dtype)
 
 
+# ---------------------------------------------------------------------------
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -333,6 +342,13 @@ def schedule_preview(steps: int, h: int, w: int, tau1: float, tau2: float,
 def main() -> int:
     a = parse_args()
 
+    # Arm names encode every schedule parameter that is off the paper's
+    # default, so two runs that differ only in tau2 or psi cannot land on the
+    # same condition directory and silently overwrite one another. The swept
+    # value stays last as `_nS` because `analysis.parse_condition_name` splits
+    # on the final "_n" -- so `cads_t2-1.2_n0.25` parses as method
+    # `cads_t2-1.2` at 0.25 and gets its own curve, which is what you want when
+    # comparing schedules.
     tag = ""
     if abs(a.cads_tau1 - 0.6) > 1e-9:
         tag += f"_t1-{a.cads_tau1:g}"
@@ -355,6 +371,7 @@ def main() -> int:
             "no arms selected: pass --cads_s with at least one value, or "
             "--baseline / --baseline_only.")
 
+    # Refuse the configuration that silently yields unconditional samples.
     if a.steps == 1 and any(x["kind"] == "cads" for x in arms):
         if cads_gamma(1.0, a.cads_tau1, a.cads_tau2) <= 0.0:
             raise SystemExit(
@@ -365,6 +382,12 @@ def main() -> int:
                 f"{cads_gamma(1.0, a.cads_tau1, 1.2):.3f}) and report it as an "
                 f"adaptation, since no published tau2 exceeds 1.0.")
 
+    # How many images per group actually get generated AND kept. They are the
+    # same number here by construction: nothing scores an image that was not
+    # written, so generating one to throw away would be pure waste.
+    # n_img: images GENERATED and scored.  n_save: images kept on disk.
+    # They diverge only under --score, where the group is scored in memory
+    # before anything is written.
     n_img = a.num_images
     n_save = (a.num_images if a.save_images_per_group <= 0
               else min(a.save_images_per_group, a.num_images))
@@ -428,6 +451,10 @@ def main() -> int:
           f"[backend={_family(a)}]")
     pipe = _Pipe.from_pretrained(a.model_id, torch_dtype=dt)
     if a.offload_device:
+        # Piecewise, because `.to(device)` moves EVERY component at once and
+        # 27.4 GB does not fit on a 24 GB card. The VAE stays with the
+        # transformer: `pipe()` decodes on its execution device, and at 0.17 GB
+        # it is far cheaper to co-locate than to work around.
         pipe.transformer.to(a.device)
         pipe.vae.to(a.device)
         moved = []
@@ -436,6 +463,11 @@ def main() -> int:
             if _m is not None and hasattr(_m, "to"):
                 _m.to(a.offload_device)
                 moved.append(_n)
+        # `pipe()` places latents on `_execution_device`, which resolves to the
+        # FIRST component's device -- a text encoder, i.e. the offload card --
+        # while the transformer is on --device. Pin it, or every call dies in
+        # pos_embed with a device mismatch. Set for the process; nothing here
+        # needs the original.
         type(pipe)._execution_device = property(
             lambda self, _d=torch.device(a.device): _d)
         print(f"[baselines] transformer + vae -> {a.device}; "
@@ -444,6 +476,9 @@ def main() -> int:
         pipe = pipe.to(a.device)
     pipe.set_progress_bar_config(disable=True)
 
+    # The scheduler's OWN sigmas, now that there is a real one. schedule_preview
+    # above is a derivation; this is the thing that will actually run, and CADS
+    # is a function of sigma, so a mismatch here changes gamma at every step.
     try:
         pipe.scheduler.set_timesteps(a.steps, device=a.device)
         _sig = [float(x) for x in pipe.scheduler.sigmas[:a.steps]]
@@ -451,9 +486,14 @@ def main() -> int:
               f"{', '.join(f'{x:.4f}' for x in _sig)}")
         print(f"[baselines] cads gamma:       "
               f"{', '.join(f'{cads_gamma(x, a.cads_tau1, a.cads_tau2):.4f}' for x in _sig)}")
-    except Exception as e:
+    except Exception as e:  # pragma: no cover
         print(f"[baselines] [!] could not read scheduler sigmas: {e!r}")
 
+    # The callback may only rewrite tensors the pipeline declares. FLUX declares
+    # latents and prompt_embeds but not the pooled projection, so it is added
+    # here -- otherwise the pooled half of the condition would stay clean while
+    # the T5 half is annealed, which is neither the paper's method nor a
+    # coherent ablation of it.
     want_pooled = not a.cads_no_pooled
     cb_inputs = list(getattr(pipe, "_callback_tensor_inputs", ["latents", "prompt_embeds"]))
     if want_pooled and "pooled_prompt_embeds" not in cb_inputs:
@@ -466,6 +506,11 @@ def main() -> int:
 
     bank = None
     if a.score:
+        # The single fdeval import in this file, and only on this path. Using
+        # their ScorerBank rather than a second implementation is the whole
+        # point: the baseline is then measured by byte-identical code to the
+        # method, and cannot silently drift onto a different CLIP backbone,
+        # LPIPS resolution or CLIPScore multiplier.
         from fdeval.scorers import ScorerBank
         from fdeval.scorers_config import METRIC_KEYS, ScorerConfig
 
@@ -480,6 +525,8 @@ def main() -> int:
         sdev = torch.device(a.scorer_device or a.device)
         print(f"[baselines] building scorers on {sdev}: {a.metrics}")
         bank = ScorerBank(scfg, sdev)
+        # Catches a scorer that raises inside the loop before a multi-hour run
+        # burns itself producing groups that all failed the same way.
         bank.self_test()
 
     device = torch.device(a.device)
@@ -497,6 +544,9 @@ def main() -> int:
                     continue
             os.makedirs(idir, exist_ok=True)
 
+            # Seeds 0..n_img-1: seed i does not depend on the group size, so a
+            # smaller group is a PREFIX of the full one and every image still
+            # pairs with the same image of an fdeval run.
             seeds = [group_seed(a.seed, uid, i) for i in range(n_img)]
             group_imgs = []
             for i, sd in enumerate(seeds):
@@ -506,6 +556,11 @@ def main() -> int:
                           guidance_scale=a.guidance_scale, generator=gen,
                           output_type="pil")
 
+                # With the encoders on another card, `pipe()` cannot call them
+                # itself (it would pass them inputs on --device), so EVERY arm
+                # has to be fed embeddings -- not just CADS, which needs them
+                # anyway. Encode on the encoders' card, then move the (small)
+                # result to the transformer's.
                 if a.offload_device and arm["kind"] != "cads":
                     _ed = torch.device(a.offload_device)
                     if _family(a) == "sd3":
@@ -524,6 +579,9 @@ def main() -> int:
                     kw.pop("prompt")
 
                 if arm["kind"] == "cads":
+                    # Noise for the conditioning is drawn from its own stream so
+                    # it can never consume draws from `gen` and shift the initial
+                    # latent -- that would break the pairing with the fdeval run.
                     cgen = torch.Generator(device=device).manual_seed(sd + 777_777)
                     s, t1, t2, psi = arm["s"], a.cads_tau1, a.cads_tau2, a.cads_psi
 
@@ -540,7 +598,14 @@ def main() -> int:
                         pe, ppe, _ = pipe.encode_prompt(
                             prompt=text, prompt_2=None, device=enc_dev,
                             num_images_per_prompt=1, max_sequence_length=512)
+                    # The CADS corruption and the callback both run on the
+                    # transformer's card, so move the embeddings once here
+                    # rather than per step.
                     pe, ppe = pe.to(device), ppe.to(device)
+                    # Step 0's conditioning must be corrupted BEFORE the pipeline
+                    # runs: callback_on_step_end fires at the END of a step, so it
+                    # can only ever prepare the NEXT one. sigma_0 is 1.0 exactly
+                    # under the schnell schedule (time_shift fixes 1.0).
                     kw["prompt_embeds"] = cads_corrupt(pe, 1.0, s, t1, t2, psi, cgen)
                     kw["pooled_prompt_embeds"] = (
                         cads_corrupt(ppe, 1.0, s, t1, t2, psi, cgen)
@@ -573,21 +638,29 @@ def main() -> int:
 
             meta = {
                 "prompt_uid": uid, "prompt_text": text, "condition": arm["name"],
+                # What rescore_from_images checks the PNG count against, so it
+                # records the images that EXIST, not the count that was asked
+                # for -- otherwise every group would look truncated.
                 "num_images": len(seeds), "num_images_requested": a.num_images,
                 "seeds": seeds,
                 "num_inference_steps": a.steps,
                 "height": a.height, "width": a.width,
-                "nfe_per_image": a.steps,
+                "nfe_per_image": a.steps,   # CADS adds no forward passes
                 "source": "baselines/cads.py",
                 "cads": ({"s": arm["s"], "tau1": a.cads_tau1, "tau2": a.cads_tau2,
                           "psi": a.cads_psi, "corrupt_pooled": bool(want_pooled)}
                          if arm["kind"] == "cads" else None),
+                # Names the scorers that have NOT been computed, which is how
+                # rescore_from_images decides there is work to do here.
                 "metrics_unavailable": ["all"],
             }
             if bank is None:
                 write_stub_npz(npz, meta)
             else:
                 feats = bank.score_group(group_imgs, text)
+                # Requested-but-absent means the model would not load. Recorded
+                # the same way fdeval records it so `group_is_complete` does not
+                # treat these groups as perpetually unfinished.
                 produced = set(feats)
                 meta["metrics_unavailable"] = sorted(
                     m for m in a.metrics.split(",")

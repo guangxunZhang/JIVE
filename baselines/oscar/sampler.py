@@ -45,6 +45,7 @@ class DiverseFlowSampler:
             if (gamma_sched > 0.0) and use_div:
                 x_pred = (x + dt * v).detach().requires_grad_(True)
                 loss, grad_pred, vlogs = self.vol.volume_loss_and_grad(x_pred)
+                # g_proj = project_partial_orth(grad_pred.detach(), v.detach(), cfg.partial_ortho)
                 g_proj = project_partial_orth(grad_pred.detach(), v.detach(), cfg.partial_ortho)
                 beta_gate = sched_factor(
                     t,
@@ -59,6 +60,13 @@ class DiverseFlowSampler:
                     h = g_proj + noise_vel
                 else:
                     h = g_proj
+                # v_norm = batched_norm(v.detach())
+                # g_norm = batched_norm(g_proj.detach())
+                # cap = cfg.gamma_max_ratio * v_norm
+                # scale = torch.minimum(torch.ones_like(cap), cap / (g_norm + 1e-12))
+                # delta = (gamma_sched * scale.view(-1,1,1,1)) * g_proj.detach()
+                # gamma_eff_scalar = float(gamma_sched)
+                # last_delta = delta.detach()
                 v_norm = batched_norm(v.detach())
                 h_norm = batched_norm(h.detach())
                 cap = cfg.gamma_max_ratio * v_norm

@@ -25,7 +25,7 @@ import os
 from collections import OrderedDict, defaultdict
 from statistics import mean, stdev
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # set_level/
 SPEC = os.path.join(ROOT, "specs", "parti_prompts.json")
 BY_RUN = os.path.join(ROOT, "outputs_parti", "parti_summary_by_run.csv")
 JIVE_CADS_SRC = os.path.join(ROOT, "outputs_jive_cads_n4", "outputs")
@@ -154,6 +154,8 @@ def from_cads(arm_csv, condition):
     return summarize(buckets)
 
 
+# Mean precision matches the published table; HPSv2 is 100x with two decimals
+# ("last two digits" of the original 0.xxx score).
 FMT = {
     "feature_vendi": (3, 1.0),
     "pixel_vendi": (3, 1.0),

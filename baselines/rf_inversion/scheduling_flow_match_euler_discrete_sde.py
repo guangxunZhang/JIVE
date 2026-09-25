@@ -63,6 +63,7 @@ class FlowMatchEulerDiscreteSDEScheduler(FlowMatchEulerDiscreteScheduler):
         if self.step_index is None:
             self._init_step_index(timestep)
 
+        # Upcast to avoid precision issues when computing prev_sample
         sample = sample.to(torch.float32)
 
         sigma = self.sigmas[self.step_index]
@@ -76,8 +77,10 @@ class FlowMatchEulerDiscreteSDEScheduler(FlowMatchEulerDiscreteScheduler):
             diffusion_coeff = (2 * sigma / (1 - sigma) * (sigma - sigma_next)).sqrt()
         prev_sample = sample + (sigma_next - sigma) * drift + diffusion_coeff * torch.randn_like(sample)
 
+        # Cast sample back to model compatible dtype
         prev_sample = prev_sample.to(model_output.dtype)
 
+        # upon completion increase step index by one
         self._step_index += 1
 
         if not return_dict:

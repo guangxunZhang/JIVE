@@ -1,15 +1,3 @@
-"""Shared FLUX sampling machinery for the local-level arms: the velocity
-closure every arm linearizes, the batched RF-Inversion SDE sampler, and the
-per-sample JIVE perturbation draw.
-
-Split out of the drivers because run_flux_arm.py (SDEdit, Boomerang) and
-run_rf_inverse.py (RF-Inversion) must agree on all three: the velocity
-convention fixes what "the Jacobian" means, and the seed offsets are what make
-inject_norm -> 0 reproduce the baseline sample-for-sample.
-
-The subspace estimator itself is in common/volume_expansion.py (shared with
-the SDEdit/Boomerang arms, which linearize a different endpoint).
-"""
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,15 +17,6 @@ PERTURB_SEED_OFFSET = 100_000
 def make_flux_velocity_fn(transformer, prompt_embeds, pooled_prompt_embeds,
                           text_ids, latent_image_ids, guidance_scale,
                           fwd_chunk, device, model_dtype):
-    """Returns velocity(z_batch, t_val) -> raw transformer output (noise_pred),
-    chunked over the batch to cap VRAM. z_batch is a PACKED FLUX latent
-    (B, seq_len, channels) in float32; t_val is the raw scheduler timestep
-    (the pipeline feeds the transformer t/1000).
-
-    RF-Inversion denoises with z_next = z + (sigma_i - sigma_{i+1}) * (-noise_pred),
-    so the flow endpoint is D_t(z) = z - sigma_t * noise_pred — the convention
-    the subspace estimator assumes.
-    """
     use_guidance = transformer.config.guidance_embeds
     weight_dtype = transformer.x_embedder.weight.dtype
 
@@ -75,8 +54,6 @@ def _pipe_device(pipe_rf):
 def _rf_inversion_chunk(pipe_rf, z_inv_cpu, image_latents_cpu, latent_image_ids_cpu,
                         prompt_embeds_cpu, pooled_prompt_embeds_cpu, args, eta,
                         start, b, delta_chunk, enable_sde):
-    """One batch chunk on the device owned by pipe_rf. SDE noise uses a
-    per-chunk torch.Generator so multi-GPU threads do not race the global RNG."""
     device = _pipe_device(pipe_rf)
     dtype = next(pipe_rf.transformer.parameters()).dtype
 
@@ -120,21 +97,6 @@ def _rf_inversion_chunk(pipe_rf, z_inv_cpu, image_latents_cpu, latent_image_ids_
 def rf_inversion_sample(pipes, inverted_latents, image_latents, latent_image_ids,
                         prompt_embeds, pooled_prompt_embeds, args, eta,
                         deltas=None, enable_sde=True):
-    """Generates args.n samples from the (optionally perturbed) inverted latent
-    by chunked batched calls to the RF-Inversion SDE pipeline.
-
-    pipes: list of RFInversionFluxPipelineSDE replicas (one per GPU). Chunks are
-    farmed out across them in parallel when len(pipes) > 1.
-
-    deltas: optional (n, seq_len, ch) float32 per-sample perturbations added to
-    the inverted latent before denoising.
-
-    SDE noise is seeded per chunk from (args.seed + SDE_SEED_OFFSET + chunk
-    start), identically for baseline and JIVE runs, so with deltas=None vs.
-    deltas=0 the two produce bit-identical samples.
-
-    Returns images as a float tensor (n, 3, H, W) in [0, 1] on CPU.
-    """
     z_inv_cpu = inverted_latents.detach().float().cpu()
     image_latents_cpu = image_latents.detach().cpu()
     latent_image_ids_cpu = latent_image_ids.detach().cpu()
@@ -172,9 +134,6 @@ def rf_inversion_sample(pipes, inverted_latents, image_latents, latent_image_ids
 
 
 def build_deltas(U, z_ref, inject_norm, args, latent_shape, device):
-    """Per-sample start offsets. additive = set-level JIVE (exact L2 norm);
-    boundary = old local sphere rotation. One independent direction seed
-    per sample."""
     seeds = [args.seed + PERTURB_SEED_OFFSET + i for i in range(args.n)]
     if getattr(args, "perturb_mode", "additive") == "additive":
         deltas = [

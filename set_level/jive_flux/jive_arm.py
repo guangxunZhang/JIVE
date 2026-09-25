@@ -1,13 +1,3 @@
-"""ARM C for FLUX: JIVE, our method.
-
-At the pure-noise starting point (sigma=1, before any denoising),
-computes for each PACKED latent separately the top singular vectors of the
-Jacobian of the flow-matching endpoint predictor
-D_t(z) = z - sigma_t * v_theta(z, t) via finite-difference subspace
-iteration, adds noise projected into that subspace with a fixed norm, then
-runs EXACTLY the same denoising as ARM A. So the only difference from the
-unmodified sampler is the one-shot projection of the shared starting points.
-"""
 import numpy as np
 import torch
 
@@ -20,11 +10,6 @@ from .jive_subspace import (
 
 
 class JiveArmFlux:
-    """Encodes the prompt once, resolves the injection point (the first
-    denoising step's t/sigma, derived exactly as FluxPipeline.__call__
-    derives its schedule), then hands out one latents_transform per
-    inject-norm value; every transform reprojects each pure-noise latent
-    into its own high-volume singular subspace before denoising."""
 
     def __init__(self, pipe, args, dev_tr, prompt_text, guidance_scale):
         self.pipe = pipe
@@ -63,17 +48,11 @@ class JiveArmFlux:
         self.sigma_init = float(pipe.scheduler.sigmas[0].item())
 
     def make_start_transform(self, inject_norm, seed_val):
-        """Returns a latents_transform(latents, img_lo) for
-        FluxArmRunner.run_arm, bound to this one inject_norm value."""
         def transform(latents, img_lo, _norm=float(inject_norm)):
             return self._make_projected_start(latents, _norm, seed_val, img_lo)
         return transform
 
     def _make_projected_start(self, latents, inject_norm, seed_val, img_lo):
-        """Projects each pure-noise starting latent (PACKED layout) into its
-        own high-volume singular subspace BEFORE any denoising. Perturbation
-        seeds use the GLOBAL image index (seed + PERTURB_SEED_OFFSET +
-        img_lo + j) so they are reproducible and independent of batching."""
         args = self.args
         lat_new = latents.clone()
         for j in range(latents.size(0)):

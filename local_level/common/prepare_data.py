@@ -24,6 +24,7 @@ import zipfile
 
 from PIL import Image
 
+# Categories served by the LMDB mirror, and the file inside the repo.
 LMDB_MIRROR_REPO = "RichardErkhov/LSUN"
 LMDB_MIRROR_FILES = {
     "classroom": "scenes/classroom_train_lmdb.zip",
@@ -52,6 +53,7 @@ def unzip_lmdb(path):
         print(f"Unzipping {path} ...")
         with zipfile.ZipFile(path) as zf:
             zf.extractall(parent)
+    # official zips contain a single <name>_lmdb directory
     cands = [extract_dir] + [
         os.path.join(parent, d)
         for d in os.listdir(parent) if d.endswith("_lmdb")
@@ -139,6 +141,7 @@ def main():
         lmdb_dir, zip_path = fetch_lmdb_from_hf(args.dataset, args.lmdb_cache)
         export_from_lmdb(lmdb_dir, out_dir, args.n_reference,
                          args.n_sources, args.resolution)
+        # Only on success: a failed run keeps the download so it can resume.
         if not args.keep_lmdb:
             shutil.rmtree(lmdb_dir, ignore_errors=True)
             shutil.rmtree(os.path.join(args.lmdb_cache, ".cache"),

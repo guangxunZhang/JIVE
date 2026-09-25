@@ -6,6 +6,27 @@
 #SBATCH --output=logs/dl_stroke2img_%j.log
 #SBATCH --error=logs/dl_stroke2img_%j.log
 
+# Downloads / builds EVERYTHING the Stroke2Image comparison needs, on a CPU
+# node (no GPU wasted):
+#   1. LSUN photos   : data/<dataset>/{reference,sources}
+#                      (2000 real reference + 32 source photos, 256x256).
+#                      classroom / kitchen / conference_room / dining_room /
+#                      restaurant come from the official LSUN train LMDBs
+#                      mirrored at RichardErkhov/LSUN, downloaded to
+#                      $LMDB_CACHE, read, then deleted.
+#   2. Stroke inputs : data_stroke/<dataset>/sources  (dab paintings of the
+#                      32 sources, make_stroke_sources.py)
+#   3. KID reference : data_stroke/<dataset>/reference -> symlink to the real
+#                      photos in data/<dataset>/reference
+#   4. Metric models : DINO / CLIP / torchvision Inception-v3 / LPIPS cached
+#                      into $HF_HOME so GPU jobs never touch the network
+#
+# The FLUX.1-dev checkpoint is NOT downloaded here — point $FLUX_MODEL at it.
+#
+# Usage (cluster):   sbatch scripts/download_stroke2image_data.sh
+#                    sbatch --export=ALL,DATASET=kitchen scripts/download_stroke2image_data.sh
+# Usage (one only):   DATASET=classroom bash scripts/download_stroke2image_data.sh
+# Idempotent: every step skips work that is already done.
 set -euo pipefail
 
 N_SOURCES=32
@@ -19,9 +40,12 @@ else
     DATASETS=(classroom kitchen conference_room dining_room restaurant)
 fi
 
+# sbatch copies the script into /opt/slurm/...; $0 is not the project dir.
 cd "${JIVE_LOCAL_LEVEL:-${SLURM_SUBMIT_DIR:-$PWD}}"
 mkdir -p logs
 
+# Env: prefer the cluster env when present; otherwise assume the caller's
+# python already has torch/diffusers/transformers/datasets/pillow/scikit-image.
 if [[ -n "${JIVE_VENV:-}" ]]; then
     source "${JIVE_VENV}/bin/activate"
 fi
@@ -36,6 +60,10 @@ prepare_dataset() {
     echo
     echo "======== ${dataset} ========"
 
+    # NOTE: the `datasets` streaming client can crash on interpreter shutdown
+    # (PyGILState_Release on a dead thread) AFTER all exports completed. The
+    # export writes its files before that point, so tolerate a post-export crash
+    # and verify counts below.
     python common/prepare_data.py \
         --dataset "${dataset}" \
         --out_root data \
@@ -69,6 +97,7 @@ for dataset in "${DATASETS[@]}"; do
     prepare_dataset "${dataset}"
 done
 
+# -------- metric models (once, shared across datasets) --------------------
 python - <<'PY'
 from transformers import AutoImageProcessor, AutoModel, CLIPModel, CLIPProcessor
 AutoImageProcessor.from_pretrained("facebook/dino-vits16")

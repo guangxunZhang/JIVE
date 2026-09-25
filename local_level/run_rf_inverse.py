@@ -1,17 +1,3 @@
-"""RF-Inversion arm (baseline and +JIVE) on LSUN sources.
-
-RF-Inversion (Rout et al.) is the inversion-based arm: each LSUN source image
-is inverted ONCE, the baseline denoises the inverted latent with the
-stochastic (SDE) sampler at a fixed eta, and +JIVE additionally rotates the
-inverted latent inside the top-k subspace of the flow endpoint Jacobian
-before denoising. Looped over many LSUN sources and scored with the
-local-level metric suite (L2, KID, Vendi, ...).
-
-Because every sample starts from the same inverted latent, the subspace is
-computed ONCE per source and shared by all samples, norms and etas.
-
-Run on the cluster via scripts/run_stroke2image.sh — not locally.
-"""
 import argparse
 import json
 import os
@@ -28,24 +14,24 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "baselines", "rf_inversion"))
 
-from diffusers import FluxPipeline  # noqa: E402
-from diffusers.training_utils import set_seed  # noqa: E402
-from diffusers.pipelines.flux.pipeline_flux import (  # noqa: E402
+from diffusers import FluxPipeline
+from diffusers.training_utils import set_seed
+from diffusers.pipelines.flux.pipeline_flux import (
     calculate_shift, retrieve_timesteps,
 )
-from pipeline_rf_inversion_sde import RFInversionFluxPipelineSDE  # noqa: E402
+from pipeline_rf_inversion_sde import RFInversionFluxPipelineSDE
 
-from rf_inversion_sampling import (  # noqa: E402
+from rf_inversion_sampling import (
     DEFAULT_FLUX_MODEL, build_deltas, make_flux_velocity_fn,
     rf_inversion_sample,
 )
-from common.experiment import (  # noqa: E402
+from common.experiment import (
     PointAccumulator, load_sources, reference_inception_feats,
     save_source_samples,
 )
-from common.metrics import LocalLevelMetrics  # noqa: E402
-from common.prepare_data import DATASETS  # noqa: E402
-from common.volume_expansion import top_subspace, top_subspace_jtj  # noqa: E402
+from common.metrics import LocalLevelMetrics
+from common.prepare_data import DATASETS
+from common.volume_expansion import top_subspace, top_subspace_jtj
 
 DEFAULT_PROMPTS = {
     "classroom": "a photo of a classroom",
@@ -59,12 +45,6 @@ DEFAULT_PROMPTS = {
 def make_flux_vjp_fn(transformer, prompt_embeds, pooled_prompt_embeds,
                      text_ids, latent_image_ids, guidance_scale, vjp_chunk,
                      device, sigma, t_val, z0, latent_shape):
-    """J^T w = w - sigma * (dv/dz)^T w for the flow endpoint D = z - sigma v.
-
-    W is (D, k); the return is (D, k). Transformer parameters are frozen so
-    only the latent VJP is allocated. Chunked because the backward is the
-    memory peak of JIVE(J^T J).
-    """
     use_guidance = bool(getattr(transformer.config, "guidance_embeds", False))
     weight_dtype = transformer.x_embedder.weight.dtype
     z0_f32 = z0.reshape(latent_shape).to(device=device, dtype=torch.float32)

@@ -1,8 +1,3 @@
-"""Command-line arguments for the set-level comparison (FLUX.1-dev / FLUX.1-schnell).
-
-Model-specific defaults are selected via --model (dev: 28 steps + distilled
-guidance 3.5; schnell: 4 steps + guidance 0).
-"""
 import os
 import argparse
 

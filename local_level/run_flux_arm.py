@@ -1,39 +1,3 @@
-"""SDEdit and Boomerang arms (baseline and +JIVE) on FLUX.
-
-ALL SIX ARMS in this folder share the FLUX.1-dev backbone so cross-method
-numbers (KID, Vendi, ...) are directly comparable. This script covers the
-noise-and-denoise arms; run_rf_inverse.py covers the inversion-based arm.
-
-Both papers' procedures adapted to rectified flow (x_sigma = (1-sigma) x0 +
-sigma eps, sigma: 1 -> 0):
-
-  SDEdit    (Meng et al., ICLR 2022): draw fresh forward noise per sample,
-            z_start = (1-sigma_t0) z0 + sigma_t0 eps, then integrate the
-            deterministic Euler ODE from sigma_t0 to 0 — the standard SDEdit /
-            img2img adaptation for flow models (diversity comes from the
-            forward draw). Sweep knob: strength t0 in [0.3, 0.6] (paper Fig. 3).
-  Boomerang (Luzi et al., TMLR 2023): same closed-form forward noising, but
-            the reverse process is STOCHASTIC at every step (paper Alg. 1 adds
-            noise each ancestral step). We use the flow-matching SDE update
-            from baselines/rf_inversion/scheduling_flow_match_euler_discrete_sde.py:
-                drift = 2 v + z / (1 - sigma)
-                diff  = sqrt(2 sigma / (1 - sigma) * (sigma - sigma_next))
-                z    <- z + (sigma_next - sigma) drift + diff * noise
-            Sweep knob: tBoom/T in {0.2 ... 0.5} (paper Sec. 4.1 picks 25-40%).
-
-On the same backbone this reverse-process difference (ODE vs SDE) is exactly
-what separates the two papers' samplers; everything else is shared.
-
-+JIVE: per source, top-k subspace of the flow endpoint Jacobian
-D(z) = z - sigma_t0 * v(z, t0) at the noised latent, then rotate each
-per-sample noised latent inside that subspace with
-projected_noise_boundary. Forward-noise and reverse-SDE seeds are shared with
-the baseline, so inject_norm -> 0 reproduces the baseline exactly. (In the
-results JSON and the sample directories this arm is still keyed "proposed" /
-"ours_*"; see local_level/README.md.)
-
-Run on the cluster via scripts/run_stroke2image.sh — not locally.
-"""
 import argparse
 import json
 import os
@@ -51,23 +15,23 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "baselines", "rf_inversion"))
 
-from diffusers import FluxPipeline  # noqa: E402
-from diffusers.training_utils import set_seed  # noqa: E402
-from diffusers.pipelines.flux.pipeline_flux import (  # noqa: E402
+from diffusers import FluxPipeline
+from diffusers.training_utils import set_seed
+from diffusers.pipelines.flux.pipeline_flux import (
     calculate_shift, retrieve_timesteps,
 )
-from pipeline_rf_inversion_sde import RFInversionFluxPipelineSDE  # noqa: E402
+from pipeline_rf_inversion_sde import RFInversionFluxPipelineSDE
 
-from rf_inversion_sampling import (  # noqa: E402
+from rf_inversion_sampling import (
     DEFAULT_FLUX_MODEL, PERTURB_SEED_OFFSET, make_flux_velocity_fn,
 )
-from common.experiment import (  # noqa: E402
+from common.experiment import (
     PointAccumulator, load_sources, reference_inception_feats,
     save_source_samples,
 )
-from common.metrics import LocalLevelMetrics  # noqa: E402
-from common.prepare_data import DATASETS  # noqa: E402
-from common.volume_expansion import (  # noqa: E402
+from common.metrics import LocalLevelMetrics
+from common.prepare_data import DATASETS
+from common.volume_expansion import (
     projected_noise_boundary, top_subspace,
 )
 
@@ -96,8 +60,6 @@ def _pipe_device(pipe):
 
 
 def build_schedule(pipe, steps, image_seq_len, device):
-    """FLUX shifted sigma schedule. Returns (timesteps (steps,), sigmas
-    (steps+1,) ending at 0) as CPU floats."""
     sigmas_lin = np.linspace(1.0, 1.0 / steps, steps)
     mu = calculate_shift(
         image_seq_len,
@@ -113,7 +75,6 @@ def build_schedule(pipe, steps, image_seq_len, device):
 
 
 def start_index(steps, strength):
-    """diffusers img2img convention: use the last round(steps*strength) steps."""
     init = min(int(round(steps * strength)), steps)
     return max(steps - init, 0)
 
@@ -122,9 +83,6 @@ def start_index(steps, strength):
 @torch.no_grad()
 def _denoise_chunk(pipe, velocity, z_chunk_cpu, timesteps, sigmas, i0, method,
                    height, width, rev_seed):
-    """Denoise one chunk from sigma_{i0} to 0 on pipe's device and decode.
-    Reverse noise (Boomerang/SDE only) uses a generator seeded with rev_seed,
-    which is identical for the baseline and +JIVE arms of the same chunk."""
     device = _pipe_device(pipe)
     dtype = next(pipe.transformer.parameters()).dtype
     z = z_chunk_cpu.to(device=device, dtype=torch.float32)
@@ -156,7 +114,6 @@ def _denoise_chunk(pipe, velocity, z_chunk_cpu, timesteps, sigmas, i0, method,
 @torch.no_grad()
 def denoise_batch(pipes, velocities, z_start_cpu, timesteps, sigmas, i0,
                   method, args, src_idx):
-    """Fans chunks of the (n, seq, ch) start latents out across pipes."""
     starts = list(range(0, z_start_cpu.shape[0], args.batch_size))
     results = {}
     n_workers = len(pipes)

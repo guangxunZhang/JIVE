@@ -1,8 +1,3 @@
-"""Loads the FLUX.1-dev pipeline and the optional per-run auxiliary models:
-the CLIP + VolumeObjective needed by ARM B (OSCAR), the Vendi feature
-embedder, and the quality scorers selected via --quality-metrics. The
-auxiliary builders are model-agnostic and live in core/.
-"""
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
@@ -17,9 +12,6 @@ from .quality_metrics import BUILDERS as _QUALITY_BUILDERS
 
 @dataclass
 class PipelineContext:
-    """Everything loaded once per process and shared read-only across the
-    whole prompt/guidance/seed sweep in main.py, so heavy models (FLUX,
-    CLIP, Vendi embedder, quality scorers) are never reloaded per run."""
     pipe: Any
     dev_tr: torch.device
     dev_vae: torch.device
@@ -33,9 +25,6 @@ class PipelineContext:
 
 
 def build_pipeline_context(args) -> PipelineContext:
-    """Loads FLUX.1-dev plus every auxiliary model needed by the requested arms
-    and metrics, and returns them bundled in a PipelineContext. Called once
-    per process, before the prompt/guidance/seed sweep in main()."""
     from diffusers import FluxPipeline
 
     dev_tr   = torch.device(args.device_transformer)

@@ -21,7 +21,7 @@ def mean_pairwise_l2(imgs_cpu: torch.Tensor) -> float:
     if n < 2:
         return 0.0
     d = torch.cdist(x, x)
-    iu = torch.triu_indices(n, n, offset=1)
+    iu = torch.triu_indices(n, n, offset=1)  # upper triangle, excluding the diagonal
     return float(d[iu[0], iu[1]].mean().item())
 
 
@@ -35,6 +35,9 @@ def compute_arm_metrics(imgs_cpu: torch.Tensor, prompt_text: str, args,
     images: that is the group OSCAR's volume objective couples, so it gets a
     metric aligned with what it optimizes next to the pooled ones.
     """
+    # Pooled pixel Vendi over ALL n images, plus the per-batch (--G) mean --
+    # the latter matches the group size OSCAR's volume objective actually
+    # optimizes, so it's directly comparable to what ARM B is targeting.
     grp_pix = [vendi_score_pixel(gr, args.vendi_kernel, args.vendi_rbf_gamma)
                for gr in imgs_cpu.split(args.G) if gr.size(0) > 1]
     m: Dict[str, Any] = {
@@ -43,6 +46,9 @@ def compute_arm_metrics(imgs_cpu: torch.Tensor, prompt_text: str, args,
         "mean_pairwise_l2": mean_pairwise_l2(imgs_cpu),
     }
     if embedder is not None:
+        # fdeval / Friedman–Dieng feature Vendi: cosine kernel on L2-normalised
+        # rows, eigenvalues of K/n. DINOv2 uses the same HF processor+CLS as
+        # fdeval.scorers.DinoScorer; feature_vendi is then vendi_dino_q1.
         feats = embedder(imgs_cpu).float()
         m["feature_vendi"] = vendi_from_features(feats, q=1.0)
         grp_feat = [vendi_from_features(fg, q=1.0)
@@ -50,8 +56,14 @@ def compute_arm_metrics(imgs_cpu: torch.Tensor, prompt_text: str, args,
         m["feature_vendi_group_mean"] = (sum(grp_feat) / len(grp_feat)) if grp_feat else None
         if getattr(embedder, "kind", None) == "dinov2":
             m.update(vendi_orders_from_features(feats, prefix="vendi_dino"))
+    # Fidelity/no-reference quality metrics from --quality-metrics, so
+    # diversity numbers above are never read without a quality axis.
     for name, fn in scorers.items():
         m[name] = fn(imgs_cpu, prompt_text) if name in PROMPT_AWARE_METRICS else fn(imgs_cpu)
+    # Scorers that expose per-image scores (attribute `last_per_image` set on
+    # the most recent call) get them recorded under a private key, so the
+    # distribution -- not just the mean -- lands in results.json and
+    # score-sorted worst/best grids can be drawn from them.
     per_image = {}
     for name, fn in scorers.items():
         li = getattr(fn, "last_per_image", None)
@@ -99,6 +111,8 @@ def save_comparison_grid(grid_rows: List[Tuple[str, torch.Tensor]], run_dir: str
 
     if not grid_rows:
         return None
+    # Use the smallest available count across arms so every row has the
+    # same number of columns (needed for make_grid's fixed nrow layout).
     n = min(min(r.size(0) for _, r in grid_rows), keep_n)
     grid = make_grid(
         torch.cat([r[:n].float() for _, r in grid_rows], dim=0),
@@ -180,6 +194,8 @@ def save_metric_plot(run_dir, sd, g, n_total, results):
                    "mean_pairwise_l2", "clip_score", "brisque", "clip_iqa", "image_reward",
                    "hpsv2", "kid_vs_deterministic_mean",
                    "cost_tflops_est", "cost_wall_time_s"]
+    # Only plot metrics every arm actually has (e.g. skip clip_score entirely
+    # if it wasn't in --quality-metrics, rather than plotting a partial bar).
     metric_keys = [mk for mk in metric_keys
                    if all(results[nm].get(mk) is not None for nm in names)]
     if not metric_keys:

@@ -8,8 +8,27 @@
 #SBATCH --output=logs/jive_parti_base_%A_%a.log
 #SBATCH --error=logs/jive_parti_base_%A_%a.log
 
+# Rows 1-3 of the set-level table: UNMODIFIED SAMPLER, OSCAR and JIVE(J), all
+# three from identical starting latents in one pass so the comparison is exact
+# and the KID reference is the run's own deterministic arm.
+#
+# JIVE here is the published configuration: inject-norm 12, rank 4, 10 subspace
+# iterations, subspace found by the J iteration (--jive-iter-mode j, the
+# default). The J^T J variant is a separate launcher.
+#
+# OSCAR perturbs at ALL denoising steps (--t-gate 0.0,1.0 --sched-shape const);
+# its default 0.85,0.95 gate never triggers on schnell's 4-step grid.
+#
+# One array task per PartiPrompts challenge aspect (11 tasks, 1632 prompts
+# total), 16 images per prompt per arm. Output tree: outputs/.
+# --skip-existing resumes after a QoS cancel without redoing finished prompts.
+#
+# Submit all 11 tasks:  sbatch scripts/run_parti_base_oscar_jive.sh
+# Submit one aspect:    sbatch --array=0 scripts/run_parti_base_oscar_jive.sh
+# Aggregate afterwards: python analysis/aggregate_parti.py
 
 TAG="base_oscar_jive"
+# Under sbatch $0 is a spool copy, so fall back to the submission dir.
 SCRIPTS_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 [[ -f "${SCRIPTS_DIR}/_common.sh" ]] || SCRIPTS_DIR="${SLURM_SUBMIT_DIR:-$PWD}/scripts"
 source "${SCRIPTS_DIR}/_common.sh"
