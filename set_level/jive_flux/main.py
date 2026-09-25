@@ -126,8 +126,6 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
     _log(f"[RUN] prompt='{prompt_text}' | seed={sd} | guidance={g} | steps={args.steps} -> {run_dir}", True)
 
     n_total = int(args.n_images)
-    # FluxArmRunner owns the shared per-image latent seeds so every arm below
-    # starts from IDENTICAL pure-noise latents (see runner.py).
     runner = FluxArmRunner(ctx.pipe, args, ctx.dev_tr, ctx.dev_vae, ctx.dtype,
                            prompt_text, g, sd)
     seq_len = (runner.lat_h // 2) * (runner.lat_w // 2)
@@ -135,11 +133,8 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
          f"packed latent shape=[{seq_len}, {runner.num_ch * 4}] "
          f"(unpacked {runner.num_ch}x{runner.lat_h}x{runner.lat_w}), batches of {args.G}", True)
 
-    # Keyed by arm name -> its metrics dict (see reporting.compute_arm_metrics).
     results: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-    # (arm_name, first keep_images_per_arm images) pairs for the comparison grid.
     grid_rows: List[Tuple[str, torch.Tensor]] = []
-    # KID reference: the deterministic arm's Inception pool3 features (see kid.py).
     kid_ref_feats = None
 
     def _metrics(imgs):
@@ -177,36 +172,27 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
             _log(f"[GRID] {arm_name} score-sorted -> {p}", True)
         return per_img
 
-    # =====================================================
-    # ARM A: deterministic flow matching (no perturbation)
-    # =====================================================
     if 'deterministic' in args.arms:
         _log(f"[ARM A] deterministic flow matching, {n_total} images from shared random starts ...", True)
         imgs_A = runner.run_arm("ARM A")
         _save_arm_images(imgs_A, os.path.join(run_dir, "A_deterministic"), args.keep_images_per_arm)
         results["deterministic"] = _metrics(imgs_A)
-        results["deterministic"]["applied_budget_l2_mean"] = 0.0  # no perturbation is ever applied in this arm
+        results["deterministic"]["applied_budget_l2_mean"] = 0.0
         _kid("deterministic", results["deterministic"], imgs_A, is_reference=True)
         per_img_A = _sorted_grids("deterministic", results["deterministic"], imgs_A)
         _log(f"[ARM A] {results['deterministic']}", True)
         if per_img_A is not None:
             results["deterministic"]["_per_image_scores"] = per_img_A
         grid_rows.append(("deterministic", imgs_A[:args.keep_images_per_arm].clone()))
-        del imgs_A  # free the (potentially large, n_total-image) tensor before the next arm
+        del imgs_A
         if ctx.dev_tr.type == 'cuda': torch.cuda.empty_cache()
 
-    # =====================================================
-    # ARM B: OSCAR per-step volume perturbation
-    # =====================================================
     if 'oscar' in args.arms:
-        # OscarArmFlux's callback_factory hands run_arm a fresh per-batch
-        # callback, since the volume objective couples only the images within
-        # one --G batch.
         oscar = OscarArmFlux(ctx.pipe, ctx.vol, ctx.cfg, args, ctx.dev_vae, ctx.dev_clip)
         _log(f"[ARM B] OSCAR per-step perturbation, {n_total} images from the SAME starts "
              f"(volume group size = {args.G}, noise mode = {args.oscar_noise_mode}) ...", True)
         imgs_B = runner.run_arm("ARM B", callback_factory=oscar.callback_factory)
-        oscar.finalize()  # flush the last batch's accumulated perturbation budget
+        oscar.finalize()
         _save_arm_images(imgs_B, os.path.join(run_dir, "B_oscar"), args.keep_images_per_arm)
         results["oscar"] = _metrics(imgs_B)
         results["oscar"]["applied_budget_l2_mean"] = oscar.mean_budget
@@ -219,22 +205,15 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
         del imgs_B
         if ctx.dev_tr.type == 'cuda': torch.cuda.empty_cache()
 
-    # =====================================================
-    # ARM C: JIVE -- per-image Jacobian-subspace projection (our method)
-    # =====================================================
     if 'jive' in args.arms:
-        # Encodes the prompt once; re-used across every --inject-norms value below.
         jive = JiveArmFlux(ctx.pipe, args, ctx.dev_tr, prompt_text, g)
         _log(f"[ARM C] injection point resolved from the scheduler: "
              f"t0={float(jive.t_init.item()):.2f}, sigma0={jive.sigma_init:.4f}", True)
         for inj_norm in args.inject_norms:
-            # One arm per inject-norm value, so a single run can sweep the
-            # perturbation budget (only suffix the name when sweeping).
             arm_name = f"jive_norm{inj_norm:g}" if len(args.inject_norms) > 1 else "jive"
             _log(f"[ARM C] per-image JIVE projection of the SAME pure-noise starts "
                  f"(sigma=1), {n_total} images (inject_norm={inj_norm}, rank={args.inject_n}, "
                  f"iters={args.jive_iters}, iter_mode={args.jive_iter_mode}) ...", True)
-            # transform is applied once, before denoising starts (see runner.run_arm).
             transform = jive.make_start_transform(inj_norm, int(sd))
             imgs_C = runner.run_arm(f"ARM C:{arm_name}", latents_transform=transform)
             _save_arm_images(imgs_C, os.path.join(run_dir, f"C_{arm_name}"), args.keep_images_per_arm)
@@ -254,13 +233,7 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
             if ctx.dev_tr.type == 'cuda': torch.cuda.empty_cache()
         jive.close()
 
-    # =====================================================
-    # ARM D: JIVE + CADS (our method x CADS)
-    # =====================================================
     if 'jive_cads' in args.arms:
-        # Same encoding/injection-point resolution as ARM C; the start
-        # transform is ARM C's verbatim, the CADS corruption is layered on
-        # top of the SAME denoising trajectory via the per-step callback.
         jive_cads = JiveCadsArmFlux(ctx.pipe, args, ctx.dev_tr, prompt_text, g)
         _log(f"[ARM D] CADS schedule: s={args.cads_s} tau1={args.cads_tau1} "
              f"tau2={args.cads_tau2} psi={args.cads_psi} (per-image noise, "
@@ -271,12 +244,7 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
                  f"+ per-step CADS conditioning corruption, {n_total} images "
                  f"(inject_norm={inj_norm}, rank={args.inject_n}, iters={args.jive_iters}, "
                  f"iter_mode={args.jive_iter_mode}) ...", True)
-            # Perturb at the beginning (ARM C's transform) ...
             transform = jive_cads.make_start_transform(inj_norm, int(sd))
-            # ... then CADS during denoising: step-0 embeds pre-corrupted,
-            # later steps re-corrupted by the callback (prompt_embeds is the
-            # only conditioning tensor this diffusers version lets the
-            # callback rewrite).
             imgs_D = runner.run_arm(
                 f"ARM D:{arm_name}",
                 latents_transform=transform,
@@ -286,8 +254,6 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
             )
             _save_arm_images(imgs_D, os.path.join(run_dir, f"D_{arm_name}"), args.keep_images_per_arm)
             results[arm_name] = _metrics(imgs_D)
-            # Latent-space applied budget is ARM C's one-shot projection norm;
-            # CADS adds no latent displacement (it perturbs the conditioning).
             results[arm_name]["applied_budget_l2_mean"] = float(inj_norm)
             results[arm_name]["cads"] = {
                 "s": float(args.cads_s), "tau1": float(args.cads_tau1),
@@ -308,7 +274,6 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
             if ctx.dev_tr.type == 'cuda': torch.cuda.empty_cache()
         jive_cads.close()
 
-    # ---------------- summary / grid / json / plot ----------------
     print_summary(prompt_text, sd, g, args.steps, n_total, results)
 
     grid_path = save_comparison_grid(grid_rows, run_dir, keep_n=8)
@@ -332,15 +297,9 @@ def _run_one(args, ctx, imgs_root, prompt_text, g, sd):
 def main():
     args = parse_args()
 
-    # Outputs go under <out-root>/outputs/<method>_<concept>/; the default
-    # out-root is set_level/, the directory containing this package. A
-    # relative --spec is resolved against it too (specs/ lives there).
     pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out_root = args.out_root or pkg_parent
 
-    # Either a single --prompt, or a --spec JSON mapping concept -> [prompts...]
-    # so many prompts can be swept in one invocation (grouped by concept in
-    # the output directory layout below).
     if args.spec:
         spec_path = args.spec
         if not os.path.isabs(spec_path):
@@ -359,16 +318,8 @@ def main():
     try:
         _log(f"[CFG] model={args.model} dir={args.model_dir} steps={args.steps} "
              f"guidances={guidances} method={args.method}", True)
-        # Loads the FLUX pipeline plus every auxiliary model needed by the
-        # selected arms/metrics (OSCAR's CLIP+volume objective, Vendi feature
-        # embedder, quality scorers) ONCE, shared across the whole sweep below.
         ctx = build_pipeline_context(args)
 
-        # Full sweep: concept -> prompt -> guidance -> seed. Each combination
-        # is one independent `_run_one` call with its own output directory.
-        # Optional `outputs_<suffix>` subdir under --out-root lets a variant
-        # run (e.g. larger OSCAR gamma0) land in its own outputs tree instead
-        # of clobbering the default outputs/ tree.
         sub = getattr(args, "outputs_subdir", None)
         sweep_root = os.path.join(out_root, f"outputs_{sub}") if sub else out_root
         for concept, prompt_list in concept_to_prompts.items():
@@ -382,8 +333,6 @@ def main():
         _log("Done.", True)
 
     except Exception:
-        # Re-raised as SystemExit(1) so the process exit code reflects failure
-        # (e.g. for shell scripts/CI that check $?), after printing the traceback.
         print("\n=== FATAL ERROR ===\n")
         traceback.print_exc()
         raise SystemExit(1)

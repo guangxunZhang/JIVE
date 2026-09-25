@@ -20,16 +20,16 @@ class PipelineContext:
     """Everything loaded once per process and shared read-only across the
     whole prompt/guidance/seed sweep in main.py, so heavy models (FLUX,
     CLIP, Vendi embedder, quality scorers) are never reloaded per run."""
-    pipe: Any                # the FluxPipeline
-    dev_tr: torch.device     # transformer (denoiser) device
-    dev_vae: torch.device    # VAE encode/decode device
-    dev_clip: torch.device   # CLIP / Vendi embedder / quality scorer device
+    pipe: Any
+    dev_tr: torch.device
+    dev_vae: torch.device
+    dev_clip: torch.device
     dtype: torch.dtype
-    vol: Optional[Any] = None       # VolumeObjective, only built if ARM B (oscar) is requested
-    cfg: Optional[Any] = None       # matching DiversityConfig for `vol`
-    embedder: Optional[Callable] = None   # Vendi feature embedder (None => pixel Vendi only)
-    scorers: Dict[str, Callable] = field(default_factory=dict)  # name -> quality metric fn
-    kid_featurizer: Optional[Callable] = None   # InceptionV3 pool3 for KID (None unless --kid)
+    vol: Optional[Any] = None
+    cfg: Optional[Any] = None
+    embedder: Optional[Callable] = None
+    scorers: Dict[str, Callable] = field(default_factory=dict)
+    kid_featurizer: Optional[Callable] = None
 
 
 def build_pipeline_context(args) -> PipelineContext:
@@ -41,14 +41,11 @@ def build_pipeline_context(args) -> PipelineContext:
     dev_tr   = torch.device(args.device_transformer)
     dev_vae  = torch.device(args.device_vae)
     dev_clip = torch.device(args.device_clip)
-    # bf16 on GPU for speed/memory; fp32 on CPU since bf16 CPU kernels are
-    # slow/unsupported for many ops.
     dtype    = torch.bfloat16 if dev_tr.type == 'cuda' else torch.float32
 
     _log(f"Devices: transformer={dev_tr}, vae={dev_vae}, clip={dev_clip}", args.debug)
     print_mem_all("before-pipeline-call", [dev_tr, dev_vae, dev_clip])
 
-    # 1) load on CPU then move to devices
     model_dir = resolve_model_dir(args.model_dir)
     _log("Loading FLUX.1-dev (CPU) ...", args.debug)
     pipe = FluxPipeline.from_pretrained(
@@ -59,14 +56,8 @@ def build_pipeline_context(args) -> PipelineContext:
     print("scheduler:", pipe.scheduler.__class__.__name__)
 
     if args.enable_model_cpu_offload:
-        # diffusers-managed offloading: submodules are moved to GPU only
-        # while running and swapped back to CPU otherwise. Mutually
-        # exclusive with the explicit per-submodule placement below.
         pipe.enable_model_cpu_offload()
     else:
-        # Explicit placement: transformer + both text encoders (CLIP ViT-L
-        # and T5-XXL) share dev_tr, the VAE gets its own (possibly different)
-        # device. FLUX has no third text encoder.
         if hasattr(pipe, "transformer"):    pipe.transformer.to(dev_tr,  dtype=dtype)
         if hasattr(pipe, "text_encoder"):   pipe.text_encoder.to(dev_tr, dtype=dtype)
         if hasattr(pipe, "text_encoder_2"): pipe.text_encoder_2.to(dev_tr, dtype=dtype)
@@ -87,26 +78,20 @@ def build_pipeline_context(args) -> PipelineContext:
         if hasattr(pipe, "transformer"): assert_on(pipe.transformer, dev_tr)
         if hasattr(pipe, "vae"):         assert_on(pipe.vae, dev_vae)
 
-    # 2) CLIP & Volume objective (only needed for the OSCAR arm) -- shared
-    # with the SD3.5 comparison; it is model-agnostic.
     vol = cfg = None
     if 'oscar' in args.arms:
         vol, cfg = build_oscar_volume_objective(args, dev_clip)
 
-    # 3) Vendi feature embedder
     embedder = None
     if args.vendi_feature != "pixel":
         embedder = build_image_embedder(args.vendi_feature, dev_clip, batch_size=args.metric_batch_size)
 
-    # 4) fidelity / no-reference quality scorers
     scorers: Dict[str, Callable] = {}
     for name in args.quality_metrics:
         fn = _QUALITY_BUILDERS[name](dev_clip, args.metric_batch_size)
         if fn is not None:
             scorers[name] = fn
 
-    # 5) KID feature extractor (InceptionV3 pool3) -- only with --kid; KID
-    # compares each perturbed arm against the deterministic one in main.py.
     kid_featurizer = build_kid_featurizer(dev_clip, args.metric_batch_size) if args.kid else None
 
     return PipelineContext(pipe=pipe, dev_tr=dev_tr, dev_vae=dev_vae, dev_clip=dev_clip,

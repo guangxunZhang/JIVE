@@ -6,16 +6,6 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/rf_inverse_aftereta_%j.log
 #SBATCH --error=logs/rf_inverse_aftereta_%j.log
-#
-# RF-Inversion on the five LSUN rooms: eta=0.5 for the first 25% of reverse
-# steps, JIVE(J^T J) added at the first step after that window, additive
-# projected-noise injection at exact L2 norms {8, 12}. Baseline + JIVE in
-# one results.json.
-#
-# Needs data_stroke/<dataset> from scripts/download_stroke2image_data.sh.
-#
-#   sbatch --partition=<partition> --export=ALL,DATASET=classroom scripts/run_rf_inverse_aftereta.sh
-#   PARTITION=<partition> DATASET=kitchen bash scripts/run_rf_inverse_aftereta.sh
 set -euo pipefail
 
 DATASET="${DATASET:?Set DATASET=classroom|kitchen|conference_room|dining_room|restaurant}"

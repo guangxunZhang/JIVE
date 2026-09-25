@@ -25,7 +25,7 @@ core/noise_projection.py (it is backbone-independent).
 """
 import torch
 
-from core.noise_projection import (  # noqa: F401  (re-exported for jive_arm)
+from core.noise_projection import (  # noqa: F401
     projected_noise_like, PERTURB_SEED_OFFSET,
 )
 
@@ -68,9 +68,6 @@ def top_singular_subspace_j(transformer, z_ref, t_val, sigma,
     chan_shape = z0.shape[1:]
 
     use_guidance = bool(getattr(transformer.config, "guidance_embeds", False))
-    # After pipe.to(device), some FLUX submodules can remain float32 while
-    # others are bf16. Match the x_embedder weight dtype so Linear does not
-    # see bf16 activations against fp32 weights (or vice versa).
     weight_dtype = transformer.x_embedder.weight.dtype
 
     def endpoint_batch(z_batch_f32):
@@ -81,7 +78,6 @@ def top_singular_subspace_j(transformer, z_ref, t_val, sigma,
         for s in range(0, z_batch_f32.shape[0], fwd_chunk):
             zc = z_batch_f32[s:s + fwd_chunk].to(weight_dtype)
             b = zc.shape[0]
-            # the pipeline feeds the transformer timestep/1000
             tt = (t_scalar.float() / 1000.0).to(zc.dtype).expand(b)
             g = (torch.full((b,), float(guidance_scale), device=device, dtype=torch.float32)
                  if use_guidance else None)
@@ -111,17 +107,12 @@ def top_singular_subspace_j(transformer, z_ref, t_val, sigma,
         d_plus = endpoint_batch(z0_f32 + fd_eps * om_hat).reshape(k, D)
         return ((d_plus - base.unsqueeze(0)) / fd_eps).T
 
-    # Subspace iteration (block power method): repeatedly apply J to an
-    # orthonormal basis Q and re-orthonormalize, converging Q's column space
-    # toward the top-n_vectors left-singular subspace of J.
     Q = torch.randn(D, n_vectors, device=device, dtype=torch.float32)
     Q, _ = torch.linalg.qr(Q, mode="reduced")
     S = None
     for it in range(n_iters):
         Y = jvp_fd_block(Q)
         if it == n_iters - 1:
-            # Column norms of J@Q right before the final re-orthonormalization
-            # approximate the top singular values.
             S = Y.norm(dim=0)
         Q, _ = torch.linalg.qr(Y, mode="reduced")
         if debug:
@@ -231,7 +222,7 @@ def top_singular_subspace_jtj(transformer, z_ref, t_val, sigma,
         om_hat = om / om_norm.reshape(k, *([1] * len(chan_shape)))
         with torch.no_grad():
             d_plus = endpoint_batch(z0_f32 + fd_eps * om_hat).reshape(k, D)
-        return ((d_plus - base.unsqueeze(0)) / fd_eps).T          # (D, k)
+        return ((d_plus - base.unsqueeze(0)) / fd_eps).T
 
     def vjp_block(W):
         """J^T @ W = W - sigma * (dv/dz)^T @ W by autograd. loss_r =
@@ -252,20 +243,17 @@ def top_singular_subspace_jtj(transformer, z_ref, t_val, sigma,
         finally:
             for p, flag in zip(transformer.parameters(), req):
                 p.requires_grad_(flag)
-        dvT_W = torch.cat(grads, dim=0).T                          # (D, k)
-        return W - sigma * dvT_W                                   # J^T W
+        dvT_W = torch.cat(grads, dim=0).T
+        return W - sigma * dvT_W
 
-    # Subspace iteration on J^T J (block power method on a symmetric PSD
-    # operator): Q converges to the top-n right singular subspace of J.
     Q = torch.randn(D, n_vectors, device=device, dtype=torch.float32)
     Q, _ = torch.linalg.qr(Q, mode="reduced")
     for it in range(n_iters):
-        W = jvp_fd_block(Q)          # J Q
-        Y = vjp_block(W)             # J^T (J Q)
+        W = jvp_fd_block(Q)
+        Y = vjp_block(W)
         Q, _ = torch.linalg.qr(Y, mode="reduced")
         if debug:
             print(f"    [jive-jtj] iter {it+1}/{n_iters} colnorms="
                   f"{[f'{float(n):.3f}' for n in Y.norm(dim=0).tolist()]}")
-    # Singular-value estimates of the converged basis: ||J q_i||.
     S = jvp_fd_block(Q).norm(dim=0)
     return Q, S

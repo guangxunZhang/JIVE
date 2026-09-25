@@ -25,7 +25,7 @@ import sys
 from PIL import Image
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)  # .../v2
+_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
 from stroke_painting import stroke_dabs, stroke_paint  # noqa: E402
@@ -65,7 +65,7 @@ def main():
     for i, f in enumerate(files):
         out_path = os.path.join(out_dir, f)
         if os.path.isfile(out_path):
-            continue  # resumable
+            continue
         img = Image.open(os.path.join(src_dir, f)).convert("RGB")
         if args.style == "dabs":
             painted = stroke_dabs(img, grid=args.grid, n_colors=args.colors,

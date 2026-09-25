@@ -15,7 +15,6 @@ is the heaviest at ~1.5GB) or point --device-clip at a second GPU / cpu.
 import torch
 import torch.nn.functional as F
 
-# Scorers that need the prompt text; the rest are no-reference (image only).
 PROMPT_AWARE_METRICS = {"clip_score", "image_reward", "hpsv2"}
 
 
@@ -28,7 +27,7 @@ def build_clip_scorer(device="cpu", batch_size=32):
         model, _, _ = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
         tokenizer = open_clip.get_tokenizer("ViT-B-32")
         model = model.to(device).eval()
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         print(f"  [clip_score] open_clip unavailable ({type(exc).__name__}: {exc}); skipping")
         return None
 
@@ -37,7 +36,6 @@ def build_clip_scorer(device="cpu", batch_size=32):
 
     @torch.no_grad()
     def score(images, prompt):
-        # Text embedding computed once per call, reused across every image chunk.
         tfeat = model.encode_text(tokenizer([prompt]).to(device)).float()
         tfeat = tfeat / tfeat.norm(dim=1, keepdim=True).clamp_min(1e-12)
         sims = []
@@ -50,7 +48,6 @@ def build_clip_scorer(device="cpu", batch_size=32):
             ifeat = model.encode_image((x - mean) / std).float()
             ifeat = ifeat / ifeat.norm(dim=1, keepdim=True).clamp_min(1e-12)
             sims.append((ifeat @ tfeat.T).squeeze(1).cpu())
-        # CLIPScore convention: cosine similarity x 100.
         return float(torch.cat(sims).mean().item() * 100.0)
 
     print("  CLIPScore: open_clip ViT-B/32 (openai)")
@@ -64,7 +61,7 @@ def build_brisque_scorer(device="cpu", batch_size=32):
     try:
         import pyiqa
         metric = pyiqa.create_metric("brisque", device=torch.device(device))
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         print(f"  [brisque] pyiqa unavailable ({type(exc).__name__}: {exc}); skipping")
         return None
 
@@ -85,7 +82,7 @@ def build_clip_iqa_scorer(device="cpu", batch_size=32):
     try:
         import pyiqa
         metric = pyiqa.create_metric("clipiqa", device=torch.device(device))
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         print(f"  [clip_iqa] pyiqa unavailable ({type(exc).__name__}: {exc}); skipping")
         return None
 
@@ -128,7 +125,7 @@ def build_image_reward_scorer(device="cpu", batch_size=32):
         import ImageReward as RM
         from torchvision.transforms.functional import to_pil_image
         model = RM.load("ImageReward-v1.0", device=str(device))
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         print(f"  [image_reward] unavailable ({type(exc).__name__}: {exc}); skipping")
         return None
 
@@ -141,15 +138,12 @@ def build_image_reward_scorer(device="cpu", batch_size=32):
         score.last_per_image = [float(r) for r in rewards]
         return float(sum(rewards) / len(rewards))
 
-    # Per-image scores of the most recent call; compute_arm_metrics picks
-    # this up for distribution analysis / score-sorted grids.
     score.last_per_image = None
 
     print("  ImageReward: THUDM ImageReward-v1.0 (prompt fidelity + quality, higher=better)")
     return score
 
 
-# name -> builder(device, batch_size), keyed to match --quality-metrics choices.
 BUILDERS = {
     "clip_score": build_clip_scorer,
     "brisque": build_brisque_scorer,

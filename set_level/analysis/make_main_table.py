@@ -14,11 +14,10 @@ Run after aggregate_parti.py:  python analysis/make_main_table.py
 import csv
 import os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # set_level/
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "outputs_parti", "parti_summary_overall.csv")
 OUT = os.path.join(ROOT, "outputs_parti", "parti_table_main.tex")
 
-# (column header, csv metric stem, higher_is_better, float format)
 COLUMNS = [
     ("CLIP-IQA", "clip_iqa", True, ".3f"),
     ("HPSv2", "hpsv2", True, ".4f"),
@@ -29,7 +28,6 @@ COLUMNS = [
     ("Pair.\\ $L_2$", "mean_pairwise_l2", True, ".1f"),
 ]
 
-# Display order + labels for the three arms of one run tree.
 ARMS = [("deterministic", "Unmodified sampler"), ("oscar", "OSCAR"), ("jive", "JIVE")]
 
 
@@ -42,7 +40,6 @@ def main():
 
     table = {a: [float(rows[a][stem + "_mean"]) for _, stem, _, _ in COLUMNS] for a, _ in ARMS}
 
-    # Best / second-best per column for bold + underline.
     styles = {}
     for j, (_, _, hib, _) in enumerate(COLUMNS):
         order = sorted(range(len(ARMS)), key=lambda i: table[ARMS[i][0]][j], reverse=hib)

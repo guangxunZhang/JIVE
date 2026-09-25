@@ -23,7 +23,7 @@ import torchvision.transforms as T
 from PIL import Image
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)  # JIVE/
+_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "baselines", "rf_inversion"))
@@ -124,12 +124,10 @@ def main():
     p.add_argument("--guidance_scale", type=float, default=3.5)
     p.add_argument("--height", type=int, default=256)
     p.add_argument("--width", type=int, default=256)
-    # RF-Inversion knobs
     p.add_argument("--gamma", type=float, default=0.5)
     p.add_argument("--etas", type=float, nargs="+", default=[0.9, 0.7, 0.6, 0.5])
     p.add_argument("--start_timestep", type=float, default=0.0)
     p.add_argument("--stop_timestep", type=float, default=0.25)
-    # +JIVE
     p.add_argument("--inject_norms", type=float, nargs="+",
                    default=[4.0, 8.0, 12.0, 16.0])
     p.add_argument("--skip_baseline", action="store_true",
@@ -153,7 +151,6 @@ def main():
     p.add_argument("--inject_after_eta", action="store_true",
                    help="Add JIVE at the first reverse step with eta_t=0 "
                         "(after stop_timestep), not at t=0.")
-    # perf / eval
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--fwd_chunk", type=int, default=2)
     p.add_argument("--metric_batch_size", type=int, default=32)
@@ -192,10 +189,6 @@ def main():
         pipe = FluxPipeline.from_pretrained(
             args.model, torch_dtype=model_dtype, local_files_only=local_only)
         pipe.to(device=dev, dtype=model_dtype)
-        # diffusers' from_pipe defaults torch_dtype=float32 and finishes with
-        # new_pipeline.to(dtype=that), silently upcasting everything to fp32
-        # (job 15417236 ran in fp32 because of this). Keep the whole pipeline
-        # in model_dtype instead.
         return RFInversionFluxPipelineSDE.from_pipe(pipe, torch_dtype=model_dtype)
 
     pipes = [_load_pipe_rf(f"cuda:{i}" if n_gpus > 0 else "cpu")
@@ -212,8 +205,6 @@ def main():
         num_images_per_prompt=1, max_sequence_length=512,
     )
 
-    # Load metrics in a background thread so it overlaps with prompt encoding
-    # and the first inversion/Jacobian computation.
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=1) as ex:
         metrics_future = ex.submit(LocalLevelMetrics, device, args.metric_batch_size)
@@ -226,10 +217,6 @@ def main():
     acc_ours = {(eta, nrm): PointAccumulator(metrics, args.metric_resolution)
                 for eta in args.etas for nrm in args.inject_norms}
 
-    # Resume support: a 48h wall-clock limit can't guarantee every source x
-    # eta finishes (this arm's per-source cost scales with len(etas)), so
-    # checkpoint the running accumulators after each source and reload them
-    # on resubmission instead of restarting from source 0.
     ckpt_stem = ("checkpoint" if args.results_name == "results.json"
                  else os.path.splitext(args.results_name)[0] + ".checkpoint")
     ckpt_path = os.path.join(args.out_dir, ckpt_stem + ".pt")
@@ -275,7 +262,6 @@ def main():
         img = T.ToPILImage()(src_01).resize((args.width, args.height),
                                             Image.LANCZOS)
 
-        # 1. invert once per source
         set_seed(args.seed)
         inverted_latents, image_latents, latent_image_ids = pipe_rf.invert(
             image=img, num_inversion_steps=args.steps, gamma=args.gamma,
@@ -283,7 +269,6 @@ def main():
         )
         latent_shape = (1,) + tuple(inverted_latents.shape[1:])
 
-        # 2. injection point (first denoising step) + subspace, once per source
         sigmas_lin = np.linspace(1.0, 1.0 / args.steps, args.steps)
         mu = calculate_shift(
             inverted_latents.shape[1],
@@ -327,8 +312,6 @@ def main():
                 n_iters=args.power_iters, fd_eps=args.fd_eps, device=device,
             )
 
-        # 3. baseline / +JIVE sampling (shared SDE seeds inside
-        # rf_inversion_sample, so norm -> 0 reproduces the baseline)
         z_ref = inverted_latents.reshape(latent_shape).float()
         for eta in args.etas:
             if not args.skip_baseline:

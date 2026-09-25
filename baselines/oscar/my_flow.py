@@ -1,6 +1,3 @@
-# ============================
-# FILE: diverse_flow/my_flow.py
-# ============================
 from typing import Optional, Dict, Any
 import importlib
 import os
@@ -14,7 +11,6 @@ def _load_state_dict_any(path: str) -> Dict[str, torch.Tensor]:
     if ext in ['.safetensors', '.sft']:
         return load_safetensors(path)
     state = torch.load(path, map_location='cpu')
-    # common wrappers
     for key in ['state_dict', 'model', 'net', 'ema_state_dict']:
         if isinstance(state, dict) and key in state and isinstance(state[key], dict):
             return state[key]
@@ -57,7 +53,6 @@ class MyFlowFromModule(BaseFlow):
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.net.to(self.device)
 
-        # default maps t in [1,0] to itself (continuous); override if your model expects int steps.
         self.t_map = lambda t: t
 
     @torch.no_grad()
@@ -71,7 +66,6 @@ class MyFlowFromModule(BaseFlow):
         else:
             return self.net(x, t_in, **cond) if isinstance(cond, dict) else self.net(x, t_in, cond)
 
-    # Helper to use discrete timesteps; call e.g. myflow.use_linear_timesteps(1000) after init.
     def use_linear_timesteps(self, n_steps:int=1000):
         self.t_map = lambda t: int(round((1.0 - max(0.0, min(1.0, t))) * (n_steps-1)))
         return self

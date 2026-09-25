@@ -8,19 +8,8 @@
 #SBATCH --output=logs/jive_parti_jtj_cads_%A_%a.log
 #SBATCH --error=logs/jive_parti_jtj_cads_%A_%a.log
 
-# JIVE(J^T J)+CADS: run_parti_jive_cads.sh with the subspace estimated by the
-# J^T J iteration instead of J. Same norm (4), same CADS schedule
-# (tau1=0.6, tau2=1.2, s=0.15, psi=1.0), so the pair of +CADS rows isolates
-# the estimator exactly as the pair of JIVE-alone rows does.
-#
-# --gres=gpu:2 for the VJP backward's memory peak; see run_parti_jive_jtj.sh.
-# Output tree: outputs_jive_cads_jtj_n4/.
-#
-# Submit all 11 tasks:  sbatch scripts/run_parti_jive_jtj_cads.sh
-# Aggregate afterwards: python analysis/aggregate_parti.py --src outputs_jive_cads_jtj_n4
 
 TAG="jive_cads_jtj_n4"
-# Under sbatch $0 is a spool copy, so fall back to the submission dir.
 SCRIPTS_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 [[ -f "${SCRIPTS_DIR}/_common.sh" ]] || SCRIPTS_DIR="${SLURM_SUBMIT_DIR:-$PWD}/scripts"
 source "${SCRIPTS_DIR}/_common.sh"

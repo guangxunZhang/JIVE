@@ -23,14 +23,11 @@ def build_oscar_volume_objective(args, dev_clip):
     clip_jit = os.path.expanduser(args.clip_jit) if args.clip_jit else None
     clip_checkpoint = os.path.expanduser(args.clip_checkpoint) if args.clip_checkpoint else None
     clip_impl = args.clip_impl
-    # 'auto': prefer the JIT checkpoint if it's actually present on disk,
-    # otherwise fall back to open_clip (which can download weights).
     if clip_impl == "auto":
         clip_impl = "openai_clip" if clip_jit and os.path.isfile(clip_jit) else "open_clip"
     if clip_impl == "openai_clip" and (not clip_jit or not os.path.isfile(clip_jit)):
         raise FileNotFoundError(f"CLIP JIT not found at {clip_jit}; use --clip-impl open_clip or provide --clip-jit")
     if clip_impl == "open_clip":
-        # ViT-B-32-quickgelu matches the openai pretrained weights
         if args.clip_arch is not None:
             clip_arch = args.clip_arch
         elif args.clip_pretrained == "openai":
@@ -47,7 +44,6 @@ def build_oscar_volume_objective(args, dev_clip):
     )
     _log("CLIP ready.", args.debug)
 
-    # t_gate is passed as "t0,t1" on the CLI; DiversityConfig wants a tuple.
     t0, t1 = args.t_gate.split(',')
     cfg = DiversityConfig(
         num_steps=args.steps, tau=args.tau, eps_logdet=args.eps_logdet,

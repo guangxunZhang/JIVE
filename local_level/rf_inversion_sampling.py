@@ -17,17 +17,14 @@ import torch
 
 from common.volume_expansion import projected_noise_boundary, projected_noise_like
 
-# Local checkpoint directory or HF repo id; override with $FLUX_MODEL.
 DEFAULT_FLUX_MODEL = os.environ.get(
     "FLUX_MODEL", "black-forest-labs/FLUX.1-dev",
 )
 
-# Seed offsets keep the independent noise roles from colliding.
-SDE_SEED_OFFSET = 50_000       # reverse-SDE noise, per chunk
-PERTURB_SEED_OFFSET = 100_000  # JIVE perturbation directions, per sample
+SDE_SEED_OFFSET = 50_000
+PERTURB_SEED_OFFSET = 100_000
 
 
-# ── FLUX velocity closure ─────────────────────────────────────────────────────
 
 def make_flux_velocity_fn(transformer, prompt_embeds, pooled_prompt_embeds,
                           text_ids, latent_image_ids, guidance_scale,
@@ -42,9 +39,6 @@ def make_flux_velocity_fn(transformer, prompt_embeds, pooled_prompt_embeds,
     the subspace estimator assumes.
     """
     use_guidance = transformer.config.guidance_embeds
-    # After pipe.to(device), some FLUX submodules can remain float32 while
-    # others are bf16. Match the x_embedder weight dtype so Linear does not
-    # see bf16 activations against fp32 weights (or vice versa).
     weight_dtype = transformer.x_embedder.weight.dtype
 
     @torch.no_grad()
@@ -72,7 +66,6 @@ def make_flux_velocity_fn(transformer, prompt_embeds, pooled_prompt_embeds,
     return velocity
 
 
-# ── batched RF-Inversion sampling ─────────────────────────────────────────────
 
 def _pipe_device(pipe_rf):
     return next(pipe_rf.transformer.parameters()).device

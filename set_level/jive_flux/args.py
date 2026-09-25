@@ -6,10 +6,6 @@ guidance 3.5; schnell: 4 steps + guidance 0).
 import os
 import argparse
 
-# Where the FLUX checkpoints live. Set FLUX_ROOT to a directory holding
-# FLUX.1-dev/ and FLUX.1-schnell/ to use local weights; with it unset the
-# presets fall back to the HF repo ids. Either can be overridden per run with
-# --model-dir.
 _FLUX_ROOT = os.environ.get("FLUX_ROOT", "")
 
 MODEL_PRESETS = {
@@ -56,14 +52,12 @@ def parse_args():
                     help='FLUX variant preset. dev: FLUX.1-dev, 28 steps, guidance 3.5. '
                          'schnell: FLUX.1-schnell, 4 steps, guidance 0 (no guidance embeds).')
 
-    # spec / prompt
     ap.add_argument('--spec', type=str, default=None, help='Path to JSON: {concept:[prompts...]}')
     ap.add_argument('--prompt', type=str, default=None, help='Single prompt if --spec not provided')
     ap.add_argument('--negative', type=str, default='',
                     help='Negative prompt. Only used when --true-cfg-scale > 1 (FLUX.1-dev '
                          'normally uses distilled guidance, which has no negative branch).')
 
-    # generation
     ap.add_argument('--n-images', type=int, default=200,
                     help='Total number of images to generate PER ARM for evaluation. '
                          'Generated in batches of --G; metrics are pooled over all of them.')
@@ -82,8 +76,6 @@ def parse_args():
     ap.add_argument('--steps', type=int, default=None,
                     help='Denoising steps. Default: 28 (dev) or 4 (schnell), from --model.')
 
-    # multi guidance / seed. FLUX.1-dev uses distilled (embedded) guidance;
-    # FLUX.1-schnell has guidance_embeds=false and expects guidance_scale=0.
     ap.add_argument('--guidances', type=float, nargs='+', default=None)
     ap.add_argument('--guidance', type=float, default=None)
     ap.add_argument('--true-cfg-scale', type=float, default=1.0,
@@ -94,7 +86,6 @@ def parse_args():
     ap.add_argument('--seeds', type=int, nargs='+', default=[1111])
     ap.add_argument('--seed', type=int, default=42)
 
-    # local model path: FLUX weights + CLIP checkpoint used by ARM B (OSCAR)
     ap.add_argument('--model-dir', type=str, default=None,
                     help='Path to local FLUX weights. Default from --model preset.')
     ap.add_argument('--clip-jit', type=str, default=os.path.expanduser('~/.cache/clip/ViT-B-32.pt'))
@@ -105,7 +96,6 @@ def parse_args():
     ap.add_argument('--clip-checkpoint', type=str, default=None)
     ap.add_argument('--clip-pretrained', type=str, default='openai')
 
-    # output/method
     ap.add_argument('--method', type=str, default='jive_flux')
     ap.add_argument('--out-root', type=str, default=None,
                     help='Root under which outputs/<method>_<concept>/ run directories are '
@@ -126,7 +116,6 @@ def parse_args():
     ap.add_argument('--skip-existing', action='store_true',
                     help='Skip a (prompt, guidance, seed) run if its results.json already exists.')
 
-    # ----- ARM C (JIVE) controls -----
     ap.add_argument('--inject-norms', type=float, nargs='+', default=[8.0],
                     help='L2 norm(s) of the projected perturbation. One ARM C run per value. '
                          'The FLUX packed latent at H x W has dim 64*(H/16)*(W/16) '
@@ -162,12 +151,6 @@ def parse_args():
                          'under no_grad), so this defaults lower than --fwd-chunk. '
                          'Ignored when --jive-iter-mode j.')
 
-    # ----- ARM D (jive_cads) CADS controls: JIVE's start projection plus
-    # CADS conditioning corruption during denoising. Defaults are the
-    # combination used for the reported combined runs: tau2=1.2 keeps every
-    # step of schnell's 4-step grid at gamma > 0 (no fully-unconditional
-    # step, unlike the paper default tau2=0.9) and s=0.15 is the corruption
-    # scale swept to in the standalone CADS baseline at this step count.
     ap.add_argument('--cads-s', type=float, default=0.15,
                     help='ARM D CADS noise scale s (Eq. 1).')
     ap.add_argument('--cads-tau1', type=float, default=0.6,
@@ -180,7 +163,6 @@ def parse_args():
                     help='ARM D CADS rescale mixing factor (Eq. 3-4); 1 restores the '
                          'conditioning mean/std fully, as the paper recommends.')
 
-    # ----- ARM B (OSCAR) diversity config -----
     ap.add_argument('--gamma0', type=float, default=0.12)
     ap.add_argument('--gamma-max-ratio', type=float, default=0.3)
     ap.add_argument('--partial-ortho', type=float, default=0.95)
@@ -200,13 +182,10 @@ def parse_args():
                          "'norm' is the legacy behavior (total norm = brown_std, "
                          "~sqrt(D)x smaller).")
 
-    # devices: can be split across multiple GPUs (or 'cpu') to fit the FLUX
-    # transformer, T5-XXL, VAE, and CLIP/quality models under one GPU's memory.
     ap.add_argument('--device-transformer', type=str, default='cuda:0')
     ap.add_argument('--device-vae', type=str, default='cuda:0')
     ap.add_argument('--device-clip', type=str, default='cuda:0')
 
-    # memory/debug
     ap.add_argument('--vae-grad-chunk', type=int, default=1,
                     help='Sub-batch size for the VAE forward/backward pass inside '
                          "ARM B's per-step callback (oscar_arm.py); lower it if that "
@@ -216,7 +195,6 @@ def parse_args():
     ap.add_argument('--enable-xformers', action='store_true')
     ap.add_argument('--debug', action='store_true', help='Verbose per-step logging.')
 
-    # diversity metric
     ap.add_argument('--vendi-kernel', choices=('cosine', 'rbf'), default='cosine')
     ap.add_argument('--vendi-feature', choices=('auto', 'dinov2', 'inception', 'clip', 'pixel'),
                     default='auto',
@@ -225,7 +203,6 @@ def parse_args():
                          'vendi_dino_q1). "pixel" disables feature Vendi.')
     ap.add_argument('--vendi-rbf-gamma', type=float, default=None)
 
-    # fidelity / no-reference quality metrics (reported per arm alongside diversity)
     ap.add_argument('--quality-metrics', type=str, nargs='+',
                     default=['clip_score', 'brisque', 'clip_iqa', 'image_reward', 'hpsv2'],
                     choices=['clip_score', 'brisque', 'clip_iqa', 'image_reward', 'hpsv2'],
@@ -236,7 +213,6 @@ def parse_args():
                          'Trim this list if you are tight on --device-clip memory -- '
                          'image_reward is the heaviest (~1.5GB checkpoint).')
 
-    # KID: distribution shift vs the deterministic arm (InceptionV3 pool3 MMD^2)
     ap.add_argument('--kid', action='store_true',
                     help='Compute KID (Kernel Inception Distance: unbiased squared MMD with '
                          'the cubic polynomial kernel on InceptionV3 pool3 features) of each '

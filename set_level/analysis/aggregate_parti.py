@@ -22,11 +22,7 @@ import re
 from collections import OrderedDict
 from statistics import mean, stdev
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # set_level/
-# Jobs write under <run tree>/jive_flux_schnell_parti_<CHALLENGE>/ (via
-# --out-root); --src points at a variant tree (e.g. outputs_jive_jtj_n12) so
-# each configuration can be rolled up separately. Summary CSVs/JSON land in
-# outputs_parti/ so they stay out of the run trees.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "outputs")
 OUT = os.path.join(ROOT, "outputs_parti")
 SPEC = os.path.join(ROOT, "specs", "parti_prompts.json")
@@ -43,8 +39,6 @@ METRICS = [
     "cost_tflops_est", "cost_wall_time_s", "cost_tf_forwards",
 ]
 
-# Official PartiPrompts difficulty bands: the 11 challenge aspects rolled up
-# into Standard / Intermediate / Challenging.
 BANDS = OrderedDict([
     ("Standard", ["Basic", "Simple Detail"]),
     ("Intermediate", ["Fine-grained Detail", "Style & Format"]),
@@ -60,10 +54,6 @@ def load_spec():
 
 
 def parse_challenge(folder, known=None):
-    # folder = <METHOD_PREFIX><CHALLENGE_SLUG>; the slugifier in
-    # baselines/oscar/utils.py strips '&' ("Style & Format" -> "Style_Format").
-    # Recover the official aspect name by matching against the spec keys: strip
-    # non-alphanumerics from both sides and compare.
     raw = folder.replace(METHOD_PREFIX, "").replace("_", " ")
     for ch in (known or []):
         norm = lambda s: re.sub(r"[^a-z0-9]+", "", s.lower())
@@ -84,7 +74,6 @@ def main():
     out = a.out if os.path.isabs(a.out) else os.path.join(ROOT, a.out)
 
     spec = load_spec()
-    # Map prompt text -> challenge aspect, so every row also carries the band.
     prompt_challenge = {p.strip(): ch for ch, prompts in spec.items() for p in prompts}
 
     rows, nested = [], {}
@@ -123,7 +112,6 @@ def main():
             w.writeheader()
             w.writerows(table)
 
-    # per-run csv
     cols = ["band", "challenge", "prompt", "seed", "arm"] + METRICS
     write_csv(os.path.join(out, "parti_summary_by_run.csv"), rows, cols)
 
@@ -142,12 +130,10 @@ def main():
             out.append(rec)
         return out
 
-    # per-challenge means
     ccols = ["challenge", "arm", "n_prompts"] + [k + s for k in METRICS for s in ("_mean", "_std")]
     write_csv(os.path.join(out, "parti_summary_by_challenge.csv"),
               grouped(["challenge", "arm"], rows), ccols)
 
-    # overall: per band + pooled
     bcols = ["band", "arm", "n_prompts"] + [k + s for k in METRICS for s in ("_mean", "_std")]
     by_band = grouped(["band", "arm"], rows)
     pooled = grouped(["arm"], rows)

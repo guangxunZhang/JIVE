@@ -16,7 +16,6 @@ from core.quality_metrics import (
     build_image_reward_scorer,
 )
 
-# Same contrastive prompt pairs as pyiqa.archs.clipiqa_arch.CLIPIQA (RN50).
 _CLIP_IQA_PROMPTS = [
     "Good image", "bad image",
     "Sharp image", "blurry image",
@@ -73,8 +72,6 @@ def build_clip_iqa_scorer(device="cpu", batch_size=32):
                               align_corners=False, antialias=True).clamp(0, 1)
             ifeat = model.encode_image((x - mean) / std).float()
             ifeat = ifeat / ifeat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-            # Temperature-scaled cosine logits for each prompt (as in CLIP's
-            # forward); reshape to (B, n_pairs, 2).
             logits = logit_scale * (ifeat @ text_feats.T)
             probs = logits.reshape(logits.size(0), n_pairs, 2).softmax(dim=-1)
             pair_probs.append(probs[..., 0].mean(dim=1).cpu())
@@ -97,9 +94,8 @@ def build_hpsv2_scorer(device="cpu", batch_size=32):
         import hpsv2
         from hpsv2 import img_score as _hps_img_score
         from torchvision.transforms.functional import to_pil_image
-        # The package hardcodes a module-level device at import; honor ours.
         _hps_img_score.device = str(device)
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         print(f"  [hpsv2] unavailable ({type(exc).__name__}: {exc}); skipping")
         return None
 
@@ -110,15 +106,12 @@ def build_hpsv2_scorer(device="cpu", batch_size=32):
         score.last_per_image = [float(r) for r in rewards]
         return float(sum(rewards) / len(rewards))
 
-    # Per-image scores of the most recent call; compute_arm_metrics picks
-    # this up for distribution analysis / score-sorted grids.
     score.last_per_image = None
 
     print("  HPSv2.1: xswu/HPSv2 ViT-H-14 (human preference v2.1, higher=better)")
     return score
 
 
-# FLUX package builders: clip_iqa uses standalone impl; brisque still tries pyiqa.
 BUILDERS = {
     **_BASE_BUILDERS,
     "clip_iqa": build_clip_iqa_scorer,

@@ -14,7 +14,7 @@ this: unpack, then (z / scaling_factor) + shift_factor through the VAE.
 import torch
 
 from baselines.oscar.utils import log as _log
-from core.schedulers import brownian_std_from_scheduler  # noqa: F401  (re-exported for the arms)
+from core.schedulers import brownian_std_from_scheduler  # noqa: F401
 
 
 class FluxArmRunner:
@@ -32,9 +32,7 @@ class FluxArmRunner:
         self.seed = seed
 
         vae_sf = getattr(pipe, "vae_scale_factor", 8)
-        self.num_ch = pipe.transformer.config.in_channels // 4  # 64 // 4 = 16
-        # FluxPipeline.prepare_latents: VAE 8x compression, and the 2x2
-        # packing additionally requires latent h/w divisible by 2.
+        self.num_ch = pipe.transformer.config.in_channels // 4
         self.lat_h = 2 * (int(args.height) // (vae_sf * 2))
         self.lat_w = 2 * (int(args.width) // (vae_sf * 2))
         self.n_total = int(args.n_images)
@@ -53,10 +51,6 @@ class FluxArmRunner:
         expects: (B, (lat_h/2)*(lat_w/2), num_ch*4)."""
         with torch.no_grad():
             outs = []
-            # Sampled ONE AT A TIME (not as a single batched torch.randn call)
-            # so each image's latent depends only on its own seed, never on
-            # its position within the batch -- required for cross-arm and
-            # cross-batch-size reproducibility.
             for img_idx in range(img_lo, img_hi):
                 outs.append(torch.randn(
                     1, self.num_ch, self.lat_h, self.lat_w,
@@ -76,9 +70,6 @@ class FluxArmRunner:
         sf = getattr(self.pipe.vae.config, "scaling_factor", 1.0)
         shift = getattr(self.pipe.vae.config, "shift_factor", None) or 0.0
         latents_final = unpacked.to(self.dev_vae, non_blocking=True)
-        # cudnn benchmarking/determinism flags disabled: this decode runs at
-        # varying batch sizes across arms/batches, and cudnn's autotuner
-        # cache thrashing on shape changes is more costly than any speedup.
         with torch.no_grad(), torch.backends.cudnn.flags(enabled=False, benchmark=False, deterministic=False):
             imgs = (self.pipe.vae.decode(latents_final / sf + shift, return_dict=False)[0]
                     .float().clamp(-1, 1) + 1.0) / 2.0
@@ -103,10 +94,6 @@ class FluxArmRunner:
             negative_prompt=(self.args.negative if (true_cfg and self.args.negative) else None),
             true_cfg_scale=float(getattr(self.args, "true_cfg_scale", 1.0)),
             height=self.args.height, width=self.args.width,
-            # text mode: one prompt, one batch element per image via
-            # num_images_per_prompt. embeds mode: the embeds ALREADY carry one
-            # batch element per image, so num_images_per_prompt must be 1 (the
-            # pipeline derives batch_size from prompt_embeds.shape[0]).
             num_images_per_prompt=(1 if use_embeds else latents_in.shape[0]),
             num_inference_steps=self.args.steps,
             guidance_scale=float(self.guidance),
@@ -143,16 +130,13 @@ class FluxArmRunner:
         all_imgs = []
         for img_lo in range(0, self.n_total, self.args.G):
             img_hi = min(self.n_total, img_lo + self.args.G)
-            # Regenerated fresh every batch (not sliced from one big
-            # pre-sampled tensor) so it exactly matches make_batch_latents'
-            # per-image seeding regardless of how batches are chunked.
             lat_in = self.make_batch_latents(img_lo, img_hi)
             if latents_transform is not None:
-                lat_in = latents_transform(lat_in, img_lo)  # ARM C/D: one-shot subspace projection
-            cb = callback_factory(img_lo) if callback_factory is not None else None  # ARM B/D: per-step perturbation
+                lat_in = latents_transform(lat_in, img_lo)
+            cb = callback_factory(img_lo) if callback_factory is not None else None
             pe = ppe = None
             if embeds_factory is not None:
-                pe, ppe = embeds_factory(img_lo, img_hi - img_lo)  # ARM D: CADS step-0 conditioning
+                pe, ppe = embeds_factory(img_lo, img_hi - img_lo)
             lat = self._denoise(cb, lat_in, prompt_embeds=pe, pooled_prompt_embeds=ppe,
                                 callback_tensor_inputs=callback_tensor_inputs)
             all_imgs.append(self.decode(lat))

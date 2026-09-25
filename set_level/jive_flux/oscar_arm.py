@@ -36,7 +36,7 @@ class OscarArmFlux:
 
         vae_sf = getattr(pipe, "vae_scale_factor", 8)
         self.vae_sf = vae_sf
-        self.num_ch = pipe.transformer.config.in_channels // 4  # 16
+        self.num_ch = pipe.transformer.config.in_channels // 4
         self.lat_h = 2 * (int(args.height) // (vae_sf * 2))
         self.lat_w = 2 * (int(args.width) // (vae_sf * 2))
 
@@ -58,8 +58,6 @@ class OscarArmFlux:
         })
 
     def _harvest_budget(self):
-        # per-image sum of applied ||delta||_2 over a batch's gated steps;
-        # collected before every state reset, plus once more at the end
         acc = self.state.get("budget_acc", None)
         if acc is not None:
             self.budget_parts.append(acc.clone())
@@ -93,9 +91,6 @@ class OscarArmFlux:
         dev_vae, dev_clip = self.dev_vae, self.dev_clip
         state = self.state
 
-        # Normalize the current step's position in [0, 1] (t_norm) and its
-        # spacing to the next step (dt_unit), both against the scheduler's
-        # own timestep range so they are independent of --steps.
         ts = ppl.scheduler.timesteps
         t_cur  = float(ts[i].item())
         t_next = float(ts[i + 1].item()) if i + 1 < len(ts) else float(ts[-1].item())
@@ -107,27 +102,18 @@ class OscarArmFlux:
         if lat_packed is None:
             return kw
 
-        # Unpack (B, seq_len, 64) -> (B, 16, lat_h, lat_w); a pure
-        # permutation, so norms are preserved exactly.
         lat = pipe._unpack_latents(lat_packed, args.height, args.width, self.vae_sf)
 
-        # gamma_sched: this step's perturbation strength, gated to only fire
-        # inside cfg.t_gate's [t0, t1] window (see baselines/oscar/utils.py).
         gamma_sched = cfg.gamma0 * time_sched_factor(t_norm, cfg.t_gate, cfg.sched_shape)
         if args.debug:
             print(f"[DBG-GATE] i={i} t_norm={t_norm:.4f} gamma_sched={gamma_sched:.6f} "
                   f"lat_dtype={lat.dtype}")
         if gamma_sched <= 0:
-            # Outside the gate window: no perturbation this step, just carry
-            # the latents forward so v_est can still be estimated once we
-            # re-enter the gate.
             state["prev_prev_latents_vae_cpu"] = state.get("prev_latents_vae_cpu", None)
             state["prev_latents_vae_cpu"] = lat.detach().to("cpu")
             state["prev_dt_unit"] = dt_unit
             return kw
 
-        # accumulate in float32: bf16 ULP at ||lat||~480 is ~2, which
-        # would round away the (relatively small) diversity perturbation.
         lat_new = lat.float().clone()
 
         lat_vae_full = lat.detach().to(dev_vae, non_blocking=True).clone()
@@ -138,10 +124,6 @@ class OscarArmFlux:
         sf_vae = getattr(pipe.vae.config, "scaling_factor", 1.0)
         shift_vae = getattr(pipe.vae.config, "shift_factor", None) or 0.0
 
-        # ---- Phase 1: volume image-gradient over the FULL batch ----
-        # Decode every image in the batch (no grad; VJP happens per-chunk in
-        # phase 2) so vol.volume_loss_and_grad sees the WHOLE group at once
-        # -- its log-det diversity objective couples all images in the batch.
         imgs_list = []
         with torch.no_grad(), torch.backends.cudnn.flags(enabled=False, benchmark=False, deterministic=False):
             for s in range(0, B, chunk):
@@ -152,9 +134,6 @@ class OscarArmFlux:
         del imgs_list
 
         _loss, grad_img_all, _logs = vol.volume_loss_and_grad(imgs_all)
-        # Anti-oscillation safeguard: if the batch's log-det diversity score
-        # dropped since the last gated step, the previous step's move likely
-        # overshot, so halve this step's strength before applying it.
         current_logdet = float(_logs.get("logdet", 0.0))
         last_logdet = state.get("last_logdet", None)
         if (last_logdet is not None) and (current_logdet < last_logdet):
@@ -162,11 +141,6 @@ class OscarArmFlux:
         state["last_logdet"] = current_logdet
         del imgs_all
 
-        # ---- Phase 2: per-chunk VAE VJP + per-sample perturbation ----
-        # Re-decode each chunk WITH grad enabled so autograd can pull
-        # grad_img_all (an image-space gradient) back through the VAE
-        # decoder into a latent-space gradient grad_lat -- i.e. compute the
-        # vector-Jacobian product (VJP) of the decoder at this chunk.
         for s in range(0, B, chunk):
             e = min(B, s + chunk)
             z = lat_vae_full[s:e].detach().clone().requires_grad_(True)
@@ -181,12 +155,6 @@ class OscarArmFlux:
                 retain_graph=False, create_graph=False, allow_unused=False
             )[0]
 
-            # v_est: an estimate of the local flow-matching velocity from the
-            # PREVIOUS step's total latent displacement, with that step's own
-            # applied perturbation (prev_ctrl) subtracted out first so v_est
-            # reflects the underlying denoising velocity, not our own noise.
-            # Falls back to the raw (unadjusted) displacement on the first
-            # gated step, when there is no prev_ctrl yet.
             v_est = None
             if prev_cpu is not None:
                 total_diff = z - prev_cpu[s:e].to(dev_vae, non_blocking=True)
@@ -199,19 +167,11 @@ class OscarArmFlux:
                 else:
                     v_est = total_diff / max(dt_unit, 1e-8)
 
-            # Project the diversity gradient partially orthogonal to v_est so
-            # the perturbation pushes images apart WITHOUT fighting the
-            # denoising trajectory itself (partial_ortho in [0,1] trades off
-            # how strictly orthogonal vs. how much raw gradient is kept).
             g_proj = project_partial_orth(grad_lat, v_est, cfg.partial_ortho) if v_est is not None else grad_lat
-            div_disp = g_proj * dt_unit  # gradient step scaled to this step's time increment
+            div_disp = g_proj * dt_unit
 
             brown_std = brownian_std_from_scheduler(ppl.scheduler, i)
             eta = float(args.eta_sde)
-            # 'sde': a true Brownian increment has per-coordinate std
-            # brown_std, i.e. total norm brown_std*sqrt(D); 'norm' keeps
-            # the legacy target (total norm = brown_std). --rho
-            # still caps the noise at rho*||base_disp|| per step.
             if args.oscar_noise_mode == 'sde':
                 base_brown = eta * brown_std * math.sqrt(z[0].numel())
             else:
@@ -219,22 +179,13 @@ class OscarArmFlux:
 
             rho_t = float(args.rho)
 
-            # base_disp: the "natural" denoising displacement this step
-            # would take without any perturbation, used as the reference
-            # scale for both the noise target and the trust-region cap below.
             base_disp = (v_est * dt_unit) if v_est is not None else z
             base_norm = _bn(base_disp)
 
-            # Per-image noise target norm = min(fixed Brownian target, an
-            # SNR-relative cap of rho_t * ||base_disp||) -- whichever is
-            # smaller, so noise never dominates the underlying denoising step.
             target_brown = torch.full_like(base_norm, fill_value=max(base_brown, 0.0))
             target_snr   = torch.clamp(base_norm * max(rho_t, 0.0), min=0.0)
             target = torch.minimum(target_brown, target_snr)
 
-            # Random exploration noise, also partially-orthogonalized against
-            # v_est (skipped if v_est is unreliable / near-zero, i.e. below
-            # --vnorm-threshold, in which case raw isotropic noise is used).
             xi = torch.randn_like(g_proj)
             vnorm = _bn(v_est) if v_est is not None else None
             if (v_est is None) or (vnorm is None) or (float(vnorm.mean().item()) < float(args.vnorm_threshold)):
@@ -245,28 +196,18 @@ class OscarArmFlux:
             xi_norm = _bn(xi_eff)
             noise_disp = xi_eff / (xi_norm.view(-1, 1, 1, 1) + 1e-12) * target.view(-1, 1, 1, 1)
 
-            # Trust-region NORMALIZATION: rescale the diversity gradient step
-            # so its norm never exceeds gamma_max_ratio * ||base_disp||,
-            # keeping the perturbation a bounded fraction of the natural
-            # denoising step regardless of how large the raw gradient is.
             disp_cap  = cfg.gamma_max_ratio * _bn(base_disp)
             div_raw   = _bn(div_disp)
             scale     = disp_cap / (div_raw + 1e-12)
 
-            # Final per-step latent perturbation = scaled, gated diversity
-            # gradient step + trust-region-capped exploration noise.
             delta_chunk = (gamma_sched * scale.view(-1, 1, 1, 1)) * div_disp + noise_disp
             delta_tr = delta_chunk.to(lat_new.device, non_blocking=True).to(lat_new.dtype)
             lat_new[s:e] = lat_new[s:e] + delta_tr
 
-            # Cached so the NEXT gated step can subtract it out of v_est
-            # (see above) and so the total applied budget can be tallied.
             if "ctrl_cache" not in state:
                 state["ctrl_cache"] = []
             state["ctrl_cache"].append(delta_chunk.detach().to("cpu"))
 
-            # Per-image running sum of ||delta||_2 across every gated step in
-            # this batch; averaged into `mean_budget` once the arm finishes.
             if "budget_acc" not in state:
                 state["budget_acc"] = torch.zeros(B)
             state["budget_acc"][s:e] += _bn(delta_chunk).detach().flatten().float().cpu()
@@ -276,15 +217,11 @@ class OscarArmFlux:
             del imgs_chunk, grad_img_vae, grad_lat, g_proj, div_disp, noise_disp, delta_chunk, delta_tr, v_est, z
 
         del grad_img_all
-        # Back to the pipeline's PACKED layout (the inverse permutation of
-        # the unpack at entry).
         lat_new_packed = pipe._pack_latents(
             lat_new.to(lat_packed.dtype).contiguous(), B, self.num_ch, self.lat_h, self.lat_w,
         )
         kw["latents"] = lat_new_packed
 
-        # Roll state forward for the next step of this same batch (kept in
-        # the UNPACKED layout on CPU).
         state["prev_prev_latents_vae_cpu"] = state.get("prev_latents_vae_cpu", None)
         state["prev_latents_vae_cpu"] = lat_vae_full.detach().to("cpu")
 

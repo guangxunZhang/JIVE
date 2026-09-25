@@ -43,9 +43,6 @@ import torchvision.transforms as T
 
 import os
 
-# Root of the external fdeval scoring harness, whose Vendi implementation is
-# reused rather than reimplemented so these numbers match the set-level ones.
-# Point FDEVAL_ROOT at your checkout.
 _FDEVAL = os.environ.get("FDEVAL_ROOT", "")
 
 
@@ -82,11 +79,10 @@ class LocalLevelMetrics:
                 import lpips
                 self.lpips_model = lpips.LPIPS(net="alex").to(device).eval()
                 print("Loaded LPIPS (alex).")
-            except Exception as e:  # noqa: BLE001 - purely optional metric
+            except Exception as e:  # noqa: BLE001
                 print(f"LPIPS unavailable ({e}); lpips_div will be None. "
                       f"`pip install lpips` to enable.")
 
-    # ── embeddings ───────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def dino_embed(self, images_01):
@@ -133,7 +129,6 @@ class LocalLevelMetrics:
             feats.append(self.inception(x).float().cpu())
         return torch.cat(feats, dim=0)
 
-    # ── faithfulness ─────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def l2_to_guide(self, images_01, guide_01):
@@ -148,7 +143,6 @@ class LocalLevelMetrics:
         gen = self.dino_embed(images_01)
         return (gen @ ref.T).squeeze(-1).mean().item()
 
-    # ── diversity ────────────────────────────────────────────────────────────
 
     @staticmethod
     def _vendi_from_embeds(emb):
@@ -250,7 +244,7 @@ class LocalLevelMetrics:
             g = torch.Generator().manual_seed(0)
             idx = torch.randperm(len(pairs), generator=g)[:max_pairs]
             pairs = [pairs[i] for i in idx]
-        x = images_01.to(self.device) * 2.0 - 1.0  # LPIPS expects [-1,1]
+        x = images_01.to(self.device) * 2.0 - 1.0
         dists = []
         for s in range(0, len(pairs), self.batch_size):
             chunk = pairs[s:s + self.batch_size]
@@ -259,7 +253,6 @@ class LocalLevelMetrics:
             dists.append(self.lpips_model(a, b).reshape(-1).cpu())
         return torch.cat(dists).mean().item()
 
-    # ── realism (KID) ────────────────────────────────────────────────────────
 
     @staticmethod
     def kid(feats_gen, feats_ref, subset_size=1000, n_subsets=100, seed=0):

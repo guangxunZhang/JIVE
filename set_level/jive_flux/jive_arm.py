@@ -32,8 +32,6 @@ class JiveArmFlux:
         self.guidance_scale = float(guidance_scale)
 
         with torch.no_grad():
-            # FLUX encode_prompt returns (prompt_embeds, pooled_embeds,
-            # text_ids); distilled guidance needs no negative branch.
             self.pe, self.pooled, self.text_ids = pipe.encode_prompt(
                 prompt=prompt_text, prompt_2=None,
                 device=dev_tr, num_images_per_prompt=1,
@@ -43,17 +41,10 @@ class JiveArmFlux:
         vae_sf = getattr(pipe, "vae_scale_factor", 8)
         lat_h = 2 * (int(args.height) // (vae_sf * 2))
         lat_w = 2 * (int(args.width) // (vae_sf * 2))
-        # Rotary position ids for the packed latent tokens, built the same
-        # way FluxPipeline.prepare_latents builds them.
         self.img_ids = pipe._prepare_latent_image_ids(
             1, lat_h // 2, lat_w // 2, dev_tr, self.pe.dtype,
         )
 
-        # Injection point: the pure-noise start. Resolve t0/sigma0 from the
-        # scheduler exactly as FluxPipeline.__call__ prepares them (linspace
-        # sigmas + dynamic shift), so the Jacobian is evaluated at the same
-        # (t, sigma) the first denoising step will see. For sigma=1 this is
-        # t ~= num_train_timesteps (1000).
         image_seq_len = (lat_h // 2) * (lat_w // 2)
         sigmas_lin = np.linspace(1.0, 1.0 / int(args.steps), int(args.steps))
         if hasattr(pipe.scheduler.config, "use_flow_sigmas") and pipe.scheduler.config.use_flow_sigmas:
@@ -85,16 +76,7 @@ class JiveArmFlux:
         img_lo + j) so they are reproducible and independent of batching."""
         args = self.args
         lat_new = latents.clone()
-        # EACH latent gets its OWN singular subspace (loop, not batched):
-        # the Jacobian of the flow-matching endpoint predictor is evaluated
-        # per-sample, so the high-volume directions differ image to image.
         for j in range(latents.size(0)):
-            # --jive-iter-mode selects WHICH operator the subspace iteration
-            # applies: 'j' is the block power method on J, 'jtj' iterates
-            # J^T J so the basis converges to J's true right singular
-            # subspace (see jive_subspace.py). Everything downstream -- the
-            # projected-noise draw, the seeds, the denoising -- is identical,
-            # so the two modes differ only in the subspace.
             if getattr(args, "jive_iter_mode", "j") == "jtj":
                 U, S = top_singular_subspace_jtj(
                     self.pipe.transformer, latents[j], self.t_init, self.sigma_init,

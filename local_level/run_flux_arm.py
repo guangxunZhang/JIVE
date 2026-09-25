@@ -46,7 +46,7 @@ import torchvision.transforms as T
 from PIL import Image
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)  # JIVE/
+_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "baselines", "rf_inversion"))
@@ -79,12 +79,9 @@ DEFAULT_PROMPTS = {
     "restaurant": "a photo of a restaurant",
 }
 
-# Seed offsets keep the independent noise roles from colliding; the
-# perturbation offset is shared with the RF-Inversion arm via
-# rf_inversion_sampling.PERTURB_SEED_OFFSET.
-FWD_SEED_OFFSET = 10_000        # forward (interpolation) noise, per source
-REV_SEED_OFFSET = 50_000        # reverse-SDE noise, per (source, chunk)
-SUBSPACE_SEED_OFFSET = 200_000  # eps_ref of the subspace linearization point
+FWD_SEED_OFFSET = 10_000
+REV_SEED_OFFSET = 50_000
+SUBSPACE_SEED_OFFSET = 200_000
 
 
 def sweep_defaults(method):
@@ -97,7 +94,6 @@ def _pipe_device(pipe):
     return next(pipe.transformer.parameters()).device
 
 
-# ── schedule ──────────────────────────────────────────────────────────────────
 
 def build_schedule(pipe, steps, image_seq_len, device):
     """FLUX shifted sigma schedule. Returns (timesteps (steps,), sigmas
@@ -122,7 +118,6 @@ def start_index(steps, strength):
     return max(steps - init, 0)
 
 
-# ── denoising (chunked across GPUs, mirrors rf_inversion_sample's pattern) ────
 
 @torch.no_grad()
 def _denoise_chunk(pipe, velocity, z_chunk_cpu, timesteps, sigmas, i0, method,
@@ -142,10 +137,8 @@ def _denoise_chunk(pipe, velocity, z_chunk_cpu, timesteps, sigmas, i0, method,
         sigma_next = float(sigmas[i + 1])
         v = velocity(z, float(timesteps[i]))
         if method == "sdedit" or sigma > 0.999:
-            # deterministic Euler ODE step
             z = z + (sigma_next - sigma) * v
         else:
-            # flow-matching SDE step (scheduling_flow_match_euler_discrete_sde)
             drift = 2.0 * v + z / (1.0 - sigma)
             diff = (2.0 * sigma / (1.0 - sigma) * (sigma - sigma_next)) ** 0.5
             noise = torch.randn(z.shape, device=device, dtype=z.dtype,
@@ -181,7 +174,6 @@ def denoise_batch(pipes, velocities, z_start_cpu, timesteps, sigmas, i0,
     return torch.cat([results[s] for s in starts], dim=0)
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser()
@@ -201,13 +193,11 @@ def main():
     p.add_argument("--strengths", type=float, nargs="+", default=None,
                    help="t0 (SDEdit) / tBoom/T (Boomerang) sweep; defaults "
                         "to each paper's recommended range")
-    # +JIVE (same latent space as the RF-Inversion arm -> same norm scale)
     p.add_argument("--inject_norms", type=float, nargs="+",
                    default=[4.0, 8.0, 12.0, 16.0])
     p.add_argument("--inject_n", type=int, default=4)
     p.add_argument("--power_iters", type=int, default=10)
     p.add_argument("--fd_eps", type=float, default=1e-1)
-    # perf / eval
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--fwd_chunk", type=int, default=2)
     p.add_argument("--metric_batch_size", type=int, default=32)
@@ -242,9 +232,6 @@ def main():
         pipe = FluxPipeline.from_pretrained(
             args.model, torch_dtype=model_dtype, local_files_only=local_only)
         pipe.to(device=dev, dtype=model_dtype)
-        # diffusers' from_pipe defaults torch_dtype=float32 and finishes with
-        # new_pipeline.to(dtype=that), silently upcasting everything to fp32
-        # (fp32 VAE vs the bf16 tensors we feed it -> encode_image crashes).
         return RFInversionFluxPipelineSDE.from_pipe(pipe, torch_dtype=model_dtype)
 
     pipes = [_load_pipe(f"cuda:{i}" if n_gpus > 0 else "cpu")
@@ -269,14 +256,13 @@ def main():
     acc_ours = {(s, nrm): PointAccumulator(metrics, args.metric_resolution)
                 for s in args.strengths for nrm in args.inject_norms}
 
-    velocities = None  # built after the first source (needs latent_image_ids)
+    velocities = None
 
     for src_idx, (src_name, src_01) in enumerate(sources):
         print(f"\n=== source {src_idx + 1}/{len(sources)}: {src_name} ===")
         img = T.ToPILImage()(src_01).resize((args.width, args.height),
                                             Image.LANCZOS)
 
-        # clean packed latent z0 (deterministic given the seed) + ids
         set_seed(args.seed)
         image_latents, _ = pipe0.encode_image(img, dtype=model_dtype,
                                               height=args.height,
@@ -289,8 +275,6 @@ def main():
         latent_shape = (1,) + tuple(z0.shape[1:])
 
         if velocities is None:
-            # one velocity closure per pipe; latent_image_ids/text embeds are
-            # positional and identical for every source at fixed resolution
             velocities = []
             for pipe in pipes:
                 dev = _pipe_device(pipe)
@@ -307,14 +291,12 @@ def main():
             sigma0 = float(sigmas[i0])
             t0_val = float(timesteps[i0])
 
-            # per-sample forward noise, shared between baseline and +JIVE
             fwd_gen = torch.Generator(device=device)
             fwd_gen.manual_seed(args.seed + FWD_SEED_OFFSET + src_idx)
             eps = torch.randn((args.n, *z0.shape[1:]), device=device,
                               generator=fwd_gen)
-            z_start = (1.0 - sigma0) * z0 + sigma0 * eps  # (n, seq, ch)
+            z_start = (1.0 - sigma0) * z0 + sigma0 * eps
 
-            # ── baseline ────────────────────────────────────────────────────
             imgs = denoise_batch(pipes, velocities, z_start.cpu(), timesteps,
                                  sigmas, i0, args.method, args, src_idx)
             acc_base[strength].add_source(imgs, src_01)
@@ -323,7 +305,6 @@ def main():
                                     f"baseline_t0_{strength:.2f}",
                                     args.save_samples_per_source)
 
-            # ── +JIVE: subspace once per (source, strength) ─────────────────
             sub_gen = torch.Generator(device=device)
             sub_gen.manual_seed(args.seed + SUBSPACE_SEED_OFFSET + src_idx)
             eps_ref = torch.randn(z0.shape, device=device, generator=sub_gen)

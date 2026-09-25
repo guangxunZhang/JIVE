@@ -78,7 +78,6 @@ def stroke_dabs(img, grid=32, n_colors=16, n_dabs=1400, dab_width=(7, 12),
     base = base.filter(ImageFilter.GaussianBlur(max(blur * 2.0, 1.0)))
     canvas = base.convert("RGBA")
 
-    # low-frequency random angle field, upsampled -> smoothly varying strokes
     coarse_angles = rng.uniform(0.0, np.pi, size=(4, 4))
     ang_img = Image.fromarray((coarse_angles * 255 / np.pi).astype(np.uint8))
     ang_img = ang_img.resize((w, h), Image.BICUBIC)

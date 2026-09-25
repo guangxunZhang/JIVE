@@ -137,7 +137,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
-        # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
             prompt_2,
@@ -159,7 +158,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
         self._interrupt = False
         do_rf_inversion = inverted_latents is not None
 
-        # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -187,7 +185,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
             lora_scale=lora_scale,
         )
 
-        # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
         if do_rf_inversion:
             latents = inverted_latents
@@ -203,7 +200,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
                 latents,
             )
 
-        # 5. Prepare timesteps
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
         image_seq_len = (int(height) // self.vae_scale_factor // 2) * (int(width) // self.vae_scale_factor // 2)
         mu = calculate_shift(
@@ -228,7 +224,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        # handle guidance
         if self.transformer.config.guidance_embeds:
             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
             guidance = guidance.expand(latents.shape[0])
@@ -237,18 +232,15 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
 
         if do_rf_inversion:
             y_0 = image_latents.clone()
-        # 6. Denoising loop / Controlled Reverse ODE, Algorithm 2 from: https://arxiv.org/pdf/2410.10792
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if do_rf_inversion:
-                    # ti (current timestep) as annotated in algorithm 2 - i/num_inference_steps.
                     t_i = 1 - t / 1000
                     dt = torch.tensor(1 / (len(timesteps) - 1), device=device)
 
                 if self.interrupt:
                     continue
 
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 noise_pred = self.transformer(
@@ -269,10 +261,9 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
                     v_t_cond = (y_0 - latents) / (1 - t_i)
                     eta_t = eta if start_timestep <= i < stop_timestep else 0.0
                     if decay_eta:
-                        eta_t = eta_t * (1 - i / num_inference_steps) ** eta_decay_power  # Decay eta over the loop
+                        eta_t = eta_t * (1 - i / num_inference_steps) ** eta_decay_power
                     v_hat_t = v_t + eta_t * (v_t_cond - v_t)
 
-                    # SDE Eq: 17 from https://arxiv.org/pdf/2410.10792
                     if not enable_sde:
                         latents = latents + v_hat_t * (sigmas[i] - sigmas[i + 1])
                     else:
@@ -290,12 +281,10 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
                         )
                         latents = latents + (sigmas[i] - sigmas[i + 1]) * drift + diffusion_coeff * noise
                 else:
-                    # compute the previous noisy sample x_t -> x_t-1
                     latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                         latents = latents.to(latents_dtype)
 
                 if callback_on_step_end is not None:
@@ -307,7 +296,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
-                # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
 
@@ -323,7 +311,6 @@ class RFInversionFluxPipelineSDE(RFInversionFluxPipeline):
             image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
 
-        # Offload all models
         self.maybe_free_model_hooks()
 
         if not return_dict:

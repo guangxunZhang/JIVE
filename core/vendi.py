@@ -17,9 +17,6 @@ import sys
 import numpy as np
 import torch
 
-# Root of the external fdeval scoring harness, whose Vendi implementation is
-# reused rather than reimplemented so the numbers cannot drift from the ones
-# the baselines are scored with. Point FDEVAL_ROOT at your checkout.
 FDEVAL = os.environ.get("FDEVAL_ROOT", "")
 VENDI_ORDERS = (0.5, 1.0, 2.0, np.inf)
 
@@ -56,8 +53,6 @@ def vendi_score_pixel(images, kernel="cosine", rbf_gamma=None, eps=1e-12):
 
     x = images.float().reshape(n, -1)
     if kernel == "cosine":
-        # mean-centered cosine similarity, rescaled from [-1,1] to [0,1] so
-        # it's a valid (PSD) similarity kernel for the eigendecomposition below.
         x = x - x.mean(dim=1, keepdim=True)
         x = x / x.norm(dim=1, keepdim=True).clamp_min(eps)
         sim = x @ x.T
@@ -66,8 +61,6 @@ def vendi_score_pixel(images, kernel="cosine", rbf_gamma=None, eps=1e-12):
     elif kernel == "rbf":
         dist2 = torch.cdist(x, x, p=2).pow(2)
         if rbf_gamma is None:
-            # median heuristic: pick gamma so the kernel bandwidth matches
-            # the typical pairwise distance in this batch.
             nonzero = dist2[dist2 > 0]
             median_dist2 = nonzero.median().clamp_min(eps) if nonzero.numel() else torch.tensor(1.0)
             rbf_gamma = 1.0 / median_dist2.item()
@@ -75,9 +68,6 @@ def vendi_score_pixel(images, kernel="cosine", rbf_gamma=None, eps=1e-12):
     else:
         raise ValueError(f"Unknown pixel Vendi kernel: {kernel}")
 
-    # Vendi Score = exp(entropy of the normalized eigenvalues of the
-    # (symmetrized) similarity/kernel matrix) -- an effective "number of
-    # distinct samples" that rewards diverse, decorrelated images.
     sim = 0.5 * (sim + sim.T)
     eigvals = torch.linalg.eigvalsh(sim).clamp_min(0)
     probs = eigvals / eigvals.sum().clamp_min(eps)
@@ -176,14 +166,10 @@ def build_image_embedder(kind="auto", device="cpu", batch_size=32):
         fn.kind = name
         return fn
 
-    # 'auto' tries DINOv2 first (strongest general-purpose features), then
-    # falls back to Inception, then CLIP, whichever is actually installed.
     order = ["dinov2", "inception", "clip"] if kind == "auto" else [kind]
     for k in order:
         try:
             if k == "dinov2":
-                # Same frontend as fdeval.scorers.DinoScorer (not torch.hub
-                # stretch-to-224, which silently changes the CLS features).
                 from transformers import AutoImageProcessor, AutoModel
 
                 model_id = "facebook/dinov2-base"
@@ -235,7 +221,7 @@ def build_image_embedder(kind="auto", device="cpu", batch_size=32):
 
                 print("  Vendi feature extractor: CLIP ViT-B/32 (512-d)")
                 return tag(embed, "clip")
-        except Exception as exc:  # pragma: no cover - environment dependent
+        except Exception as exc:
             print(f"  [vendi] '{k}' embedder unavailable ({type(exc).__name__}: {exc}); trying next")
 
     print("  [vendi] no feature extractor available; falling back to pixel Vendi only.")

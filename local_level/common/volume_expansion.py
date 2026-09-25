@@ -65,7 +65,6 @@ def top_subspace(endpoint_fn, z_ref, n_vectors, latent_shape, n_iters=10,
         Y = jvp_block(Q)
         Q, _ = torch.linalg.qr(Y, mode="reduced")
 
-    # Rayleigh-Ritz on the converged subspace
     M = Q.T @ jvp_block(Q)
     M = 0.5 * (M + M.T)
     evals, evecs = torch.linalg.eigh(M)
@@ -120,11 +119,10 @@ def top_subspace_jtj(endpoint_fn, vjp_fn, z_ref, n_vectors, latent_shape,
     Q, _ = torch.linalg.qr(Q, mode="reduced")
 
     for _ in range(n_iters):
-        W = jvp_block(Q)          # J Q
-        Y = vjp_fn(W)             # J^T (J Q)
+        W = jvp_block(Q)
+        Y = vjp_fn(W)
         Q, _ = torch.linalg.qr(Y, mode="reduced")
 
-    # Rayleigh–Ritz on the symmetric Gram Q^T (J^T J) Q.
     W = jvp_block(Q)
     Y = vjp_fn(W)
     M = Q.T @ Y

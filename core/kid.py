@@ -73,9 +73,9 @@ def build_kid_featurizer(device="cpu", batch_size=32):
         import torchvision
         weights = torchvision.models.Inception_V3_Weights.DEFAULT
         model = torchvision.models.inception_v3(weights=weights, aux_logits=True)
-        model.fc = torch.nn.Identity()  # pool3 (avgpool) 2048-d output
+        model.fc = torch.nn.Identity()
         model = model.to(device).eval()
-    except Exception as exc:  # pragma: no cover - environment dependent
+    except Exception as exc:
         print(f"  [kid] InceptionV3 unavailable ({type(exc).__name__}: {exc}); KID disabled")
         return None
 

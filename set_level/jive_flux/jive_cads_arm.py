@@ -52,13 +52,10 @@ and it is the same effective behaviour the standalone CADS baseline gets.
 """
 import torch
 
-from baselines.cads import cads_gamma, cads_corrupt  # noqa: F401  (re-exported)
+from baselines.cads import cads_gamma, cads_corrupt  # noqa: F401
 
 from .jive_arm import JiveArmFlux
 
-# Seed spacing for the CADS conditioning-noise stream. Latent seeds are
-# seed + i and perturbation seeds are seed + PERTURB_SEED_OFFSET(=100_000) + i
-# with i < 10_000, so this offset + stride keeps the three streams disjoint.
 CADS_SEED_OFFSET = 200_000
 CADS_STEP_STRIDE = 64
 
@@ -81,9 +78,8 @@ class JiveCadsArmFlux(JiveArmFlux):
         self.cads_tau1 = float(args.cads_tau1)
         self.cads_tau2 = float(args.cads_tau2)
         self.cads_psi = float(args.cads_psi)
-        self.base_seed = None  # bound per run in make_start_transform
+        self.base_seed = None
 
-    # -- CADS pieces --------------------------------------------------------
 
     def _corrupt(self, y_clean, t, seed_val):
         """One CADS corruption of a SINGLE image's conditioning (y_clean is

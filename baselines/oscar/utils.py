@@ -10,7 +10,6 @@ import time
 from typing import Tuple, Union, Optional
 from collections import OrderedDict
 
-# ---- logging / mem ----
 
 def _gb(x): 
     return f"{x/1024**3:.2f} GB"
@@ -31,7 +30,6 @@ def print_mem_all(tag: str, devices: list):
             lines.append(f"  {d}: CPU")
     print("\n".join(lines), flush=True)
 
-# ---- model/device introspection ----
 
 def _first_device_of_module(m: nn.Module):
     if not isinstance(m, nn.Module):
@@ -79,15 +77,12 @@ def assert_on(m, want):
         if str(b.device) != str(want):
             raise RuntimeError(f"Buffer on {b.device}, expected {want}")
 
-# ---- path & text utils ----
 
 def slugify(text: str, maxlen: int = 120) -> str:
     s = re.sub(r'\s+', '_', text.strip())
     s = re.sub(r'[^A-Za-z0-9._-]+', '', s)
     s = re.sub(r'_{2,}', '_', s).strip('._-')
     if maxlen and len(s) > maxlen:
-        # Long prompts that share a 120-char prefix (e.g. Parti style variants)
-        # must not collide in one run dir; disambiguate with a content hash.
         digest = hashlib.sha1(text.encode()).hexdigest()[:8]
         return f"{s[:maxlen - 9]}_{digest}"
     return s
@@ -147,7 +142,6 @@ def _parse_gate(t_gate: Optional[Union[str, Tuple[float, float]]]) -> Tuple[floa
             raise ValueError(f"t_gate string must be 'a,b', got: {t_gate!r}")
         t1, t2 = float(parts[0]), float(parts[1])
     else:
-        # tuple/list/np array -> 2 floats
         try:
             t1, t2 = t_gate  # type: ignore
             t1, t2 = float(t1), float(t2)
